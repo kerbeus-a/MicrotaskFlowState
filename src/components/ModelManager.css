@@ -1,0 +1,167 @@
+.model-manager {
+  padding: 20px;
+  background: #1a1a1a;
+  color: #e0e0e0;
+  max-width: 500px;
+  margin: 0 auto;
+}
+
+.model-manager h2 {
+  margin: 0 0 8px 0;
+  font-size: 20px;
+  color: #ffffff;
+}
+
+.model-manager-description {
+  margin: 0 0 20px 0;
+  font-size: 13px;
+  color: #888;
+  line-height: 1.5;
+}
+
+.models-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.model-item {
+  background: #2a2a2a;
+  border-radius: 8px;
+  padding: 16px;
+  border: 1px solid #333;
+}
+
+.model-info {
+  margin-bottom: 12px;
+}
+
+.model-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.model-name {
+  font-weight: 600;
+  font-size: 16px;
+  color: #ffffff;
+}
+
+.model-size {
+  font-size: 13px;
+  color: #888;
+}
+
+.model-status {
+  font-size: 12px;
+}
+
+.status-installed {
+  color: #4ade80;
+}
+
+.status-missing {
+  color: #f87171;
+}
+
+.model-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-download,
+.btn-select,
+.btn-delete {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-download {
+  background: #4a9eff;
+  color: #ffffff;
+}
+
+.btn-download:hover:not(:disabled) {
+  background: #3a8eef;
+}
+
+.btn-download:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-select {
+  background: #2a2a2a;
+  color: #4a9eff;
+  border: 1px solid #4a9eff;
+}
+
+.btn-select:hover:not(:disabled) {
+  background: #333;
+}
+
+.btn-select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.btn-delete {
+  background: transparent;
+  color: #f87171;
+  border: 1px solid #f87171;
+}
+
+.btn-delete:hover {
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.download-progress {
+  margin-top: 12px;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background: #333;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4a9eff, #6bb6ff);
+  transition: width 0.3s;
+}
+
+.progress-text {
+  font-size: 11px;
+  color: #888;
+  text-align: center;
+}
+
+.model-note {
+  padding: 12px;
+  background: #2a2a2a;
+  border-radius: 6px;
+  border-left: 3px solid #4a9eff;
+}
+
+.model-note p {
+  margin: 0;
+  font-size: 12px;
+  color: #aaa;
+  line-height: 1.5;
+}
+
+.model-note strong {
+  color: #e0e0e0;
+}
