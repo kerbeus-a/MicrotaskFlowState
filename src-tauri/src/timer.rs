@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter, Manager};
 
 static TIMER_START: Mutex<Option<Instant>> = Mutex::new(None);
 static TIMER_DURATION: Duration = Duration::from_secs(15 * 60); // 15 minutes
@@ -48,14 +48,14 @@ pub fn reset_timer() -> Result<(), String> {
 
 fn trigger_alert(app: &AppHandle) {
     // Emit event to frontend
-    if let Some(window) = app.get_window("main") {
-        window.emit("timer-alert", ()).unwrap();
-        
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("timer-alert", ());
+
         // Visual pulse - flash window
-        window.show().unwrap();
-        window.set_focus().unwrap();
+        let _ = window.show();
+        let _ = window.set_focus();
     }
-    
+
     // TODO: Play chime sound
     // For now, we'll rely on frontend to handle audio
 }

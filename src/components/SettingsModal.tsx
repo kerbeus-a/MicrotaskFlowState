@@ -1,14 +1,30 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/tauri";
 import ModelManager from "./ModelManager";
 import "./SettingsModal.css";
+
+interface AudioDevice {
+  deviceId: string;
+  label: string;
+}
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
+  // Microphone settings
+  availableDevices?: AudioDevice[];
+  selectedDeviceId?: string | null;
+  onDeviceChange?: (deviceId: string) => void;
+  onRefreshDevices?: () => void;
 }
 
-export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
+export default function SettingsModal({ 
+  isOpen, 
+  onClose,
+  availableDevices = [],
+  selectedDeviceId,
+  onDeviceChange,
+  onRefreshDevices,
+}: SettingsModalProps) {
   const [ollamaStatus, setOllamaStatus] = useState<"checking" | "connected" | "disconnected">("checking");
   const [ollamaModel, setOllamaModel] = useState<string>("llama3");
 
@@ -47,6 +63,41 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         </div>
 
         <div className="settings-content">
+          <div className="settings-section">
+            <h3>Microphone</h3>
+            <div className="microphone-settings">
+              <div className="device-select-container">
+                <select
+                  className="device-select"
+                  value={selectedDeviceId || ''}
+                  onChange={(e) => onDeviceChange?.(e.target.value)}
+                >
+                  {availableDevices.length === 0 ? (
+                    <option value="">No microphones found</option>
+                  ) : (
+                    availableDevices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <button 
+                  className="refresh-devices-button"
+                  onClick={onRefreshDevices}
+                  title="Refresh device list"
+                >
+                  🔄
+                </button>
+              </div>
+              {availableDevices.length === 0 && (
+                <p className="status-detail">
+                  No microphones detected. Please connect a microphone and click refresh.
+                </p>
+              )}
+            </div>
+          </div>
+
           <div className="settings-section">
             <h3>Ollama (LLM)</h3>
             <div className="ollama-status">

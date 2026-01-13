@@ -7,26 +7,33 @@ mod timer;
 mod whisper;
 mod ollama;
 
-use tauri::{Manager, WindowEvent};
+use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             // Initialize database
-            let db = database::init_database(app)?;
+            let app_handle_for_db = app.handle().clone();
+            let db = database::init_database(&app_handle_for_db)?;
             app.manage(db);
-            
-            // Setup global shortcut (Win + Alt + R)
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = setup_global_shortcut(&app_handle).await {
-                    eprintln!("Failed to setup global shortcut: {}", e);
-                }
-            });
-            
+
+            // Initialize Whisper model cache (avoids reloading model on every recording)
+            let whisper_cache = whisper::WhisperCache::new();
+            app.manage(whisper_cache);
+
+            // Setup global shortcut (Win + Alt + R) - DISABLED
+            // let app_handle = app.handle().clone();
+            // tauri::async_runtime::spawn(async move {
+            //     if let Err(e) = setup_global_shortcut(app_handle).await {
+            //         eprintln!("Failed to setup global shortcut: {}", e);
+            //     }
+            // });
+
             // Setup awareness timer
             timer::setup_awareness_timer(app.handle().clone());
-            
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -44,11 +51,13 @@ fn main() {
             commands::check_whisper_model,
             commands::delete_whisper_model,
             commands::transcribe_audio,
+            commands::save_audio_file,
+            commands::process_voice_recording,
         ])
-        .on_window_event(|event| {
-            if let WindowEvent::CloseRequested { api, .. } = event.event() {
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Hide window instead of closing
-                event.window().hide().unwrap();
+                window.hide().unwrap();
                 api.prevent_close();
             }
         })
@@ -56,20 +65,44 @@ fn main() {
         .expect("error while running tauri application");
 }
 
-async fn setup_global_shortcut(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::GlobalShortcutManager;
-    
-    let mut shortcut_manager = app.global_shortcut();
-    
-    // Register Win + Alt + R
-    shortcut_manager.register("Alt+Meta+R", move || {
-        if let Some(window) = app.get_window("main") {
-            window.show().unwrap();
-            window.set_focus().unwrap();
-            // Trigger recording (this will be handled by frontend)
-            window.emit("start-recording", ()).unwrap();
-        }
-    })?;
-    
-    Ok(())
-}
+// Global shortcut setup - DISABLED
+// async fn setup_global_shortcut(app: tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+//     use tauri::{GlobalShortcutManager, Manager};
+//     
+//     let mut shortcut_manager = app.global_shortcut_manager();
+//     
+//     // Try different shortcut combinations (Windows may reserve Win+Alt combinations)
+//     // Priority: Ctrl+Alt+R (most compatible), then F12, then Super+Shift+R
+//     let shortcuts = vec!["Ctrl+Alt+R", "F12", "Super+Shift+R"];
+//     
+//     let mut registered = false;
+//     for shortcut in shortcuts {
+//         let app_clone = app.clone();
+//         let result = shortcut_manager.register(shortcut, move || {
+//             if let Some(window) = app_clone.get_window("main") {
+//                 let _ = window.show();
+//                 let _ = window.set_focus();
+//                 // Trigger recording (this will be handled by frontend)
+//                 let _ = window.emit("start-recording", ());
+//             }
+//         });
+//         
+//         match result {
+//             Ok(_) => {
+//                 eprintln!("Successfully registered global shortcut: {}", shortcut);
+//                 registered = true;
+//                 break;
+//             }
+//             Err(e) => {
+//                 eprintln!("Failed to register shortcut {}: {}. Trying next...", shortcut, e);
+//                 // Continue to next shortcut
+//             }
+//         }
+//     }
+//     
+//     if !registered {
+//         eprintln!("Warning: Could not register any global shortcut. The app will still work, but voice recording must be triggered manually from the UI.");
+//     }
+//     
+//     Ok(())
+// }

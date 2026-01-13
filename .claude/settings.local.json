@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(where:*)",
+      "Bash(powershell -Command \"npm --version\")",
+      "Bash(cmd.exe /c npm --version)",
+      "Bash(where.exe:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(npm run tauri:*)",
+      "Bash(cargo build:*)"
+    ]
+  }
+}

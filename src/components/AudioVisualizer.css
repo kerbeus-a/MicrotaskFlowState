@@ -1,0 +1,123 @@
+.audio-visualizer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  background: #2a2a2a;
+  border-radius: 8px;
+  margin: 12px 0;
+}
+
+/* Volume Meter */
+.volume-meter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.volume-meter-label {
+  font-size: 12px;
+  color: #888;
+  min-width: 50px;
+}
+
+.volume-meter-bar-container {
+  flex: 1;
+  height: 8px;
+  background: #1a1a1a;
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.volume-meter-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.1s ease-out, background-color 0.3s ease;
+}
+
+.volume-meter-value {
+  font-size: 12px;
+  color: #888;
+  min-width: 35px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Waveform */
+.waveform-container {
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+  background: #1a1a1a;
+  border-radius: 4px;
+}
+
+.waveform-canvas {
+  display: block;
+  border-radius: 4px;
+}
+
+/* Recording Indicator */
+.recording-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+}
+
+.recording-pulse {
+  width: 8px;
+  height: 8px;
+  background: #ef4444;
+  border-radius: 50%;
+  animation: pulse-red 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-red {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.2);
+  }
+}
+
+.recording-text {
+  font-size: 12px;
+  color: #ef4444;
+  font-weight: 500;
+  animation: pulse-text 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-text {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+/* Responsive adjustments */
+@media (max-width: 320px) {
+  .audio-visualizer {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .volume-meter-label,
+  .volume-meter-value {
+    font-size: 10px;
+  }
+
+  .waveform-canvas {
+    width: 150px;
+    height: 40px;
+  }
+}

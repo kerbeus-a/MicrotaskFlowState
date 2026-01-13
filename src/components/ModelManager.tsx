@@ -1,7 +1,10 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/tauri";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./ModelManager.css";
+
+// Check if running in Tauri (v2 uses __TAURI_INTERNALS__)
+const isTauri = typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI_IPC__" in window);
 
 interface ModelInfo {
   name: string;
@@ -24,6 +27,11 @@ export default function ModelManager() {
   const [selectedModel, setSelectedModel] = useState<string>("tiny");
 
   useEffect(() => {
+    if (!isTauri) {
+      console.warn("ModelManager: Not running in Tauri, models cannot be loaded");
+      return;
+    }
+
     loadModels();
 
     // Listen for download progress
@@ -37,8 +45,10 @@ export default function ModelManager() {
   }, []);
 
   const loadModels = async () => {
+    if (!isTauri) return;
     try {
       const loadedModels = await invoke<ModelInfo[]>("list_whisper_models");
+      console.log("Loaded models:", loadedModels);
       setModels(loadedModels);
       
       // Set default selected model to first installed one, or tiny
@@ -48,10 +58,16 @@ export default function ModelManager() {
       }
     } catch (error) {
       console.error("Failed to load models:", error);
+      // Show error to user
+      alert(`Failed to load models: ${error}. Please check the console for details.`);
     }
   };
 
   const handleDownload = async (modelName: string) => {
+    if (!isTauri) {
+      alert("Model download only works in the Tauri app. Please run 'npm run tauri dev'.");
+      return;
+    }
     try {
       setDownloading(modelName);
       setDownloadProgress(null);
@@ -88,12 +104,27 @@ export default function ModelManager() {
     return `${(mb / 1000).toFixed(1)} GB`;
   };
 
+  if (!isTauri) {
+    return (
+      <div className="model-manager">
+        <h2>Whisper Models</h2>
+        <p style={{ color: "#f87171", padding: "20px", background: "#2a2a2a", borderRadius: "8px" }}>
+          ⚠️ Model management requires the Tauri app. Please run 'npm run tauri dev' to access this feature.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="model-manager">
       <h2>Whisper Models</h2>
       <p className="model-manager-description">
         Download Whisper models for speech-to-text. Start with "Tiny" (75 MB) for fastest performance.
       </p>
+
+      {models.length === 0 && (
+        <div className="loading-models">Loading models...</div>
+      )}
 
       <div className="models-list">
         {models.map((model) => (

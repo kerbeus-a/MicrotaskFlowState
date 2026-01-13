@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Result, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 pub struct Database {
     pub conn: Mutex<Connection>,
@@ -17,13 +17,13 @@ pub struct Task {
 }
 
 pub fn init_database(app: &AppHandle) -> Result<Database> {
-    let app_data_dir = app.path_resolver()
+    let app_data_dir = app.path()
         .app_data_dir()
         .expect("Failed to get app data directory");
-    
+
     std::fs::create_dir_all(&app_data_dir)
         .expect("Failed to create app data directory");
-    
+
     let db_path = app_data_dir.join("flowstate.db");
     let conn = Connection::open(db_path)?;
     
@@ -195,4 +195,40 @@ fn get_task_by_id(db: &Database, id: i64) -> Result<Task> {
             completed_at: row.get(4)?,
         })
     })
+}
+
+// Find and delete a task by fuzzy text matching
+pub fn find_and_delete_task(db: &Database, search_text: &str) -> Result<Option<Task>> {
+    let conn = db.conn.lock().unwrap();
+
+    // Try to find matching task (fuzzy match using LIKE)
+    let search_pattern = format!("%{}%", search_text.to_lowercase());
+    let mut stmt = conn.prepare(
+        "SELECT id, text, completed, created_at, completed_at
+         FROM tasks
+         WHERE LOWER(text) LIKE ?1
+         ORDER BY
+            CASE WHEN LOWER(text) = ?2 THEN 0 ELSE 1 END,
+            completed ASC,
+            created_at DESC
+         LIMIT 1"
+    )?;
+
+    let search_exact = search_text.to_lowercase();
+    if let Ok(task) = stmt.query_row(params![search_pattern, search_exact], |row| {
+        Ok(Task {
+            id: row.get(0)?,
+            text: row.get(1)?,
+            completed: row.get::<_, i32>(2)? != 0,
+            created_at: row.get(3)?,
+            completed_at: row.get(4)?,
+        })
+    }) {
+        // Delete the task
+        drop(stmt);
+        conn.execute("DELETE FROM tasks WHERE id = ?1", params![task.id])?;
+        Ok(Some(task))
+    } else {
+        Ok(None)
+    }
 }
