@@ -323,8 +323,9 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
         }, 500);
       });
 
-      // Create audio context for visualization
-      const audioContext = new AudioContext({ sampleRate: 16000 });
+      // Create audio context for visualization (use default sample rate for recording)
+      // We'll downsample to 16kHz later when encoding WAV
+      const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
       
       // Resume audio context if suspended (browser autoplay policy)
@@ -433,13 +434,19 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
           // Get recorded audio
           const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
 
-          // Convert to WAV
-          const audioContext = audioContextRef.current;
-          if (!audioContext) {
-            throw new Error('Audio context not available');
-          }
+          // Convert to WAV - need a fresh AudioContext for decoding
+          // (the original one may have been created with different sample rate)
+          const decodeContext = new AudioContext();
           const arrayBuffer = await audioBlob.arrayBuffer();
-          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+          let audioBuffer: AudioBuffer;
+          try {
+            audioBuffer = await decodeContext.decodeAudioData(arrayBuffer);
+          } catch (decodeErr) {
+            console.error('Failed to decode audio:', decodeErr);
+            await decodeContext.close();
+            throw new Error('Failed to decode audio. Try recording again.');
+          }
 
           // Get audio data (first channel, mono)
           const channelData = audioBuffer.getChannelData(0);
@@ -457,7 +464,10 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
 
           // Cleanup
           streamRef.current?.getTracks().forEach((track) => track.stop());
-          await audioContext.close();
+          await decodeContext.close();
+          if (audioContextRef.current) {
+            await audioContextRef.current.close();
+          }
 
           // Update refs
           isRecordingRef.current = false;

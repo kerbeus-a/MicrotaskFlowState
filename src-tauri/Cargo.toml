@@ -24,7 +24,7 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.11", features = ["json", "stream"] }
 futures-util = "0.3"
 chrono = "0.4"
-windows = { version = "0.52", features = ["Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+windows = { version = "0.52", features = ["Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Registry"] }
 # whisper-rs for speech-to-text (requires LLVM/Clang)
 whisper-rs = "0.11"
 hound = "3.5"

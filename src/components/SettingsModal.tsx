@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import ModelManager from "./ModelManager";
 import "./SettingsModal.css";
 
@@ -27,12 +28,35 @@ export default function SettingsModal({
 }: SettingsModalProps) {
   const [ollamaStatus, setOllamaStatus] = useState<"checking" | "connected" | "disconnected">("checking");
   const [ollamaModel, setOllamaModel] = useState<string>("llama3");
+  const [autoStartEnabled, setAutoStartEnabled] = useState<boolean>(false);
+  const [autoStartLoading, setAutoStartLoading] = useState<boolean>(false);
 
   useEffect(() => {
     if (isOpen) {
       checkOllamaStatus();
+      checkAutoStartStatus();
     }
   }, [isOpen]);
+
+  const checkAutoStartStatus = async () => {
+    try {
+      const enabled = await invoke<boolean>("get_autostart_enabled");
+      setAutoStartEnabled(enabled);
+    } catch (error) {
+      console.error("Failed to check auto-start status:", error);
+    }
+  };
+
+  const toggleAutoStart = async () => {
+    setAutoStartLoading(true);
+    try {
+      await invoke("set_autostart_enabled", { enabled: !autoStartEnabled });
+      setAutoStartEnabled(!autoStartEnabled);
+    } catch (error) {
+      console.error("Failed to toggle auto-start:", error);
+    }
+    setAutoStartLoading(false);
+  };
 
   const checkOllamaStatus = async () => {
     try {
@@ -95,6 +119,26 @@ export default function SettingsModal({
                   No microphones detected. Please connect a microphone and click refresh.
                 </p>
               )}
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <h3>Startup</h3>
+            <div className="autostart-setting">
+              <label className="toggle-label">
+                <input
+                  type="checkbox"
+                  checked={autoStartEnabled}
+                  onChange={toggleAutoStart}
+                  disabled={autoStartLoading}
+                />
+                <span className="toggle-text">
+                  Start with Windows
+                </span>
+              </label>
+              <p className="status-detail">
+                Launch MicroTask automatically when you log in
+              </p>
             </div>
           </div>
 

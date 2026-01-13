@@ -53,6 +53,8 @@ fn main() {
             commands::transcribe_audio,
             commands::save_audio_file,
             commands::process_voice_recording,
+            commands::get_autostart_enabled,
+            commands::set_autostart_enabled,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

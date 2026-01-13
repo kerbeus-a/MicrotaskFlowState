@@ -332,3 +332,136 @@ pub async fn process_voice_recording(
 
     Ok(results)
 }
+
+// Windows auto-start functionality
+#[cfg(target_os = "windows")]
+mod autostart {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegOpenKeyExW, RegSetValueExW, RegDeleteValueW, RegQueryValueExW, RegCloseKey,
+        HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, HKEY,
+    };
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    const APP_NAME: &str = "MicroTask";
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    fn to_wide_null(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn set_autostart(enabled: bool, exe_path: &str) -> Result<(), String> {
+        unsafe {
+            let key_path = to_wide_null(RUN_KEY);
+            let mut hkey: HKEY = HKEY::default();
+
+            let result = RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key_path.as_ptr()),
+                0,
+                KEY_WRITE,
+                &mut hkey,
+            );
+
+            if result.is_err() {
+                return Err(format!("Failed to open registry key: {:?}", result));
+            }
+
+            let app_name_wide = to_wide_null(APP_NAME);
+
+            let result = if enabled {
+                let exe_path_wide = to_wide_null(exe_path);
+                let bytes: &[u8] = std::slice::from_raw_parts(
+                    exe_path_wide.as_ptr() as *const u8,
+                    exe_path_wide.len() * 2,
+                );
+                RegSetValueExW(
+                    hkey,
+                    PCWSTR(app_name_wide.as_ptr()),
+                    0,
+                    REG_SZ,
+                    Some(bytes),
+                )
+            } else {
+                RegDeleteValueW(hkey, PCWSTR(app_name_wide.as_ptr()))
+            };
+
+            let _ = RegCloseKey(hkey);
+
+            if result.is_err() {
+                // Ignore error when deleting non-existent value
+                if !enabled {
+                    return Ok(());
+                }
+                return Err(format!("Failed to modify registry: {:?}", result));
+            }
+
+            Ok(())
+        }
+    }
+
+    pub fn get_autostart() -> Result<bool, String> {
+        unsafe {
+            let key_path = to_wide_null(RUN_KEY);
+            let mut hkey: HKEY = HKEY::default();
+
+            let result = RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key_path.as_ptr()),
+                0,
+                KEY_READ,
+                &mut hkey,
+            );
+
+            if result.is_err() {
+                return Ok(false);
+            }
+
+            let app_name_wide = to_wide_null(APP_NAME);
+            let mut data_size: u32 = 0;
+
+            let result = RegQueryValueExW(
+                hkey,
+                PCWSTR(app_name_wide.as_ptr()),
+                None,
+                None,
+                None,
+                Some(&mut data_size),
+            );
+
+            let _ = RegCloseKey(hkey);
+
+            Ok(result.is_ok() && data_size > 0)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn get_autostart_enabled() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        autostart::get_autostart()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub fn set_autostart_enabled(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe_path = std::env::current_exe()
+            .map_err(|e| format!("Failed to get executable path: {}", e))?
+            .to_string_lossy()
+            .to_string();
+        autostart::set_autostart(enabled, &exe_path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enabled;
+        Err("Auto-start is only supported on Windows".to_string())
+    }
+}
