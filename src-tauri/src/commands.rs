@@ -115,9 +115,101 @@ pub fn reset_timer() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn get_timer_duration(app: AppHandle) -> Result<u64, String> {
+    crate::timer::get_timer_duration_minutes()
+        .map_err(|e: String| e)
+}
+
+#[tauri::command]
+pub fn set_timer_duration(app: AppHandle, minutes: u64) -> Result<(), String> {
+    if minutes > 60 {
+        return Err("Timer duration cannot exceed 60 minutes".to_string());
+    }
+    crate::timer::set_timer_duration(&app, minutes)
+        .map_err(|e: String| e)
+}
+
+#[tauri::command]
 pub fn set_always_on_top(window: Window, always_on_top: bool) -> Result<(), String> {
     window.set_always_on_top(always_on_top)
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WindowState {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[tauri::command]
+pub fn get_window_state(window: Window) -> Result<WindowState, String> {
+    let position = window.outer_position()
+        .map_err(|e| format!("Failed to get window position: {}", e))?;
+    // Use inner_size to match what set_size expects (inner size)
+    let size = window.inner_size()
+        .map_err(|e| format!("Failed to get window size: {}", e))?;
+    
+    Ok(WindowState {
+        x: position.x as f64,
+        y: position.y as f64,
+        width: size.width as f64,
+        height: size.height as f64,
+    })
+}
+
+#[tauri::command]
+pub fn set_window_state(window: Window, state: WindowState) -> Result<(), String> {
+    use tauri::LogicalPosition;
+    use tauri::LogicalSize;
+    
+    window.set_position(LogicalPosition::new(state.x as f64, state.y as f64))
+        .map_err(|e| format!("Failed to set window position: {}", e))?;
+    // set_size sets inner size, which matches what we're storing
+    window.set_size(LogicalSize::new(state.width as f64, state.height as f64))
+        .map_err(|e| format!("Failed to set window size: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn save_window_state(app: AppHandle, state: WindowState) -> Result<(), String> {
+    let app_data_dir = app.path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?;
+    
+    std::fs::create_dir_all(&app_data_dir)
+        .map_err(|e| format!("Failed to create app data directory: {}", e))?;
+    
+    let config_path = app_data_dir.join("window_state.json");
+    let json = serde_json::to_string_pretty(&state)
+        .map_err(|e| format!("Failed to serialize window state: {}", e))?;
+    
+    std::fs::write(&config_path, json)
+        .map_err(|e| format!("Failed to write window state: {}", e))?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+pub fn load_window_state(app: AppHandle) -> Result<Option<WindowState>, String> {
+    let app_data_dir = app.path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?;
+    
+    let config_path = app_data_dir.join("window_state.json");
+    
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    
+    let json = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read window state: {}", e))?;
+    
+    let state: WindowState = serde_json::from_str(&json)
+        .map_err(|e| format!("Failed to parse window state: {}", e))?;
+    
+    Ok(Some(state))
 }
 
 #[derive(Debug, Serialize, Deserialize)]

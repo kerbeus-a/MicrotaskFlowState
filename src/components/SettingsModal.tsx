@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ModelManager from "./ModelManager";
 import "./SettingsModal.css";
@@ -30,13 +30,48 @@ export default function SettingsModal({
   const [ollamaModel, setOllamaModel] = useState<string>("llama3");
   const [autoStartEnabled, setAutoStartEnabled] = useState<boolean>(false);
   const [autoStartLoading, setAutoStartLoading] = useState<boolean>(false);
+  const [timerDuration, setTimerDuration] = useState<number>(15);
+  const [timerDurationLoading, setTimerDurationLoading] = useState<boolean>(false);
+  const timerSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       checkOllamaStatus();
       checkAutoStartStatus();
+      loadTimerDuration();
     }
   }, [isOpen]);
+
+  const loadTimerDuration = async () => {
+    try {
+      const duration = await invoke<number>("get_timer_duration");
+      setTimerDuration(duration);
+    } catch (error) {
+      console.error("Failed to load timer duration:", error);
+    }
+  };
+
+  const handleTimerDurationChange = (minutes: number) => {
+    // Update local state immediately for smooth slider movement
+    setTimerDuration(minutes);
+    
+    // Clear any pending save operation
+    if (timerSaveTimeoutRef.current) {
+      clearTimeout(timerSaveTimeoutRef.current);
+    }
+    
+    // Debounce the save operation - only save after user stops sliding
+    // Don't set loading state - keep slider enabled for smooth interaction
+    timerSaveTimeoutRef.current = setTimeout(async () => {
+      try {
+        await invoke("set_timer_duration", { minutes });
+        // Reset timer with new duration
+        await invoke("reset_timer");
+      } catch (error) {
+        console.error("Failed to set timer duration:", error);
+      }
+    }, 500); // Wait 500ms after user stops sliding
+  };
 
   const checkAutoStartStatus = async () => {
     try {
@@ -119,6 +154,31 @@ export default function SettingsModal({
                   No microphones detected. Please connect a microphone and click refresh.
                 </p>
               )}
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <h3>Timer</h3>
+            <div className="timer-setting">
+              <label className="slider-label">
+                <span className="slider-text">Awareness Timer Duration</span>
+                <span className="slider-value">{timerDuration} min</span>
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="60"
+                value={timerDuration}
+                onInput={(e) => {
+                  const value = parseInt((e.target as HTMLInputElement).value);
+                  setTimerDuration(value);
+                }}
+                onChange={(e) => handleTimerDurationChange(parseInt(e.target.value))}
+                className="timer-slider"
+              />
+              <p className="status-detail">
+                Set the timer duration (0-60 minutes). Timer alerts you when it expires.
+              </p>
             </div>
           </div>
 

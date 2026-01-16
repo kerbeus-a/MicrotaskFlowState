@@ -1,0 +1,39 @@
+.pin-toggle {
+  width: 36px;
+  height: 20px;
+  background: #4a4a4a;
+  border-radius: 10px;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  display: inline-block;
+}
+
+.pin-toggle.pinned {
+  background: #3b82f6;
+}
+
+.pin-toggle-slider {
+  width: 16px;
+  height: 16px;
+  background: #ffffff;
+  border-radius: 50%;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  transition: transform 0.2s ease, background 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.pin-toggle.pinned .pin-toggle-slider {
+  transform: translateX(16px);
+  background: #ffffff;
+}
+
+.pin-toggle:hover {
+  background: #5a5a5a;
+}
+
+.pin-toggle.pinned:hover {
+  background: #2563eb;
+}

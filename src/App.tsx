@@ -1,11 +1,13 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import TaskList from "./components/TaskList";
 import RecordButton from "./components/RecordButton";
 import TimerBar from "./components/TimerBar";
 import SettingsModal from "./components/SettingsModal";
 import AudioVisualizer from "./components/AudioVisualizer";
+import PinIcon from "./components/PinIcon";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
 import "./App.css";
 
@@ -42,16 +44,65 @@ function App() {
     }
   }, [audioRecorder.availableDevices, audioRecorder.selectedDeviceId, audioRecorder.state.isRecording]);
 
+  // Window state persistence
+  const windowStateSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   useEffect(() => {
     if (!isTauri) {
       console.warn("⚠️ Running in browser mode. Tauri features will not work. Please run 'npm run tauri dev' to launch the Tauri app.");
       return;
     }
 
+    // Restore window state on startup (after a short delay to ensure window is ready)
+    const restoreWindowState = async () => {
+      try {
+        // Wait a bit for window to be fully initialized
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const savedState = await invoke<{ x: number; y: number; width: number; height: number } | null>("load_window_state");
+        if (savedState) {
+          // Validate state (ensure window fits on screen)
+          if (savedState.width > 0 && savedState.height > 0 && savedState.x >= -1000 && savedState.y >= -1000) {
+            await invoke("set_window_state", { state: savedState });
+          }
+        }
+      } catch (error) {
+        console.error("Failed to restore window state:", error);
+      }
+    };
+
+    restoreWindowState();
+
     loadTasks();
     updateTimer();
     checkWhisperModels();
     const interval = setInterval(updateTimer, 1000);
+
+    // Save window state on move/resize (debounced)
+    const saveWindowState = async () => {
+      try {
+        const state = await invoke<{ x: number; y: number; width: number; height: number }>("get_window_state");
+        await invoke("save_window_state", { state });
+      } catch (error) {
+        console.error("Failed to save window state:", error);
+      }
+    };
+
+    const window = getCurrentWindow();
+    
+    // Listen for window move/resize events
+    const unlistenMove = window.onMoved(() => {
+      if (windowStateSaveTimeoutRef.current) {
+        clearTimeout(windowStateSaveTimeoutRef.current);
+      }
+      windowStateSaveTimeoutRef.current = setTimeout(saveWindowState, 500);
+    });
+
+    const unlistenResize = window.onResized(() => {
+      if (windowStateSaveTimeoutRef.current) {
+        clearTimeout(windowStateSaveTimeoutRef.current);
+      }
+      windowStateSaveTimeoutRef.current = setTimeout(saveWindowState, 500);
+    });
 
     // Listen for timer alerts
     const unlisten = listen("timer-alert", () => {
@@ -70,8 +121,13 @@ function App() {
 
     return () => {
       clearInterval(interval);
+      if (windowStateSaveTimeoutRef.current) {
+        clearTimeout(windowStateSaveTimeoutRef.current);
+      }
       unlisten.then(fn => fn());
       unlistenRecording.then(fn => fn());
+      unlistenMove.then(fn => fn());
+      unlistenResize.then(fn => fn());
     };
   }, []);
 
@@ -290,7 +346,7 @@ function App() {
               onClick={toggleAlwaysOnTop}
               title={alwaysOnTop ? "Disable always on top" : "Enable always on top"}
             >
-              {alwaysOnTop ? "📌" : "📍"}
+              <PinIcon isPinned={alwaysOnTop} />
             </button>
           </div>
         </div>
@@ -301,15 +357,6 @@ function App() {
           onStartRecording={handleStartRecording}
           onStopRecording={handleStopRecording}
         />
-
-        {/* Current microphone indicator */}
-        {audioRecorder.availableDevices.length > 0 && (
-          <div className="current-microphone-container">
-            <div className="current-microphone" onClick={() => setShowSettings(true)} title="Click to change microphone">
-              🎤 {audioRecorder.availableDevices.find(d => d.deviceId === audioRecorder.selectedDeviceId)?.label || 'Select microphone'}
-            </div>
-          </div>
-        )}
 
         {/* Audio Visualizer - only show when recording */}
         {audioRecorder.state.isRecording && (
