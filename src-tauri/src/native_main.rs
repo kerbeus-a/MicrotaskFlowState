@@ -1,0 +1,805 @@
+// Prevents additional console window on Windows in release, DO NOT REMOVE!!
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+//! Native UI version using egui - 0% CPU when idle
+//! Run with: cargo run --bin flowstate-native --features native-ui --no-default-features
+
+mod database;
+mod ollama;
+mod whisper;
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use eframe::egui;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::thread;
+
+// Download state shared between UI and download thread
+#[derive(Clone)]
+struct DownloadState {
+    is_downloading: Arc<Mutex<bool>>,
+    current_model: Arc<Mutex<Option<String>>>,
+    progress: Arc<Mutex<f32>>,        // 0.0 to 1.0
+    downloaded_mb: Arc<Mutex<f32>>,
+    total_mb: Arc<Mutex<f32>>,
+    error: Arc<Mutex<Option<String>>>,
+    completed: Arc<Mutex<bool>>,
+}
+
+impl Default for DownloadState {
+    fn default() -> Self {
+        Self {
+            is_downloading: Arc::new(Mutex::new(false)),
+            current_model: Arc::new(Mutex::new(None)),
+            progress: Arc::new(Mutex::new(0.0)),
+            downloaded_mb: Arc::new(Mutex::new(0.0)),
+            total_mb: Arc::new(Mutex::new(0.0)),
+            error: Arc::new(Mutex::new(None)),
+            completed: Arc::new(Mutex::new(false)),
+        }
+    }
+}
+
+// App state
+struct FlowStateApp {
+    // Database
+    db: database::Database,
+
+    // Tasks
+    tasks: Vec<database::Task>,
+
+    // Timer
+    timer_start: Instant,
+    timer_duration: Duration,
+
+    // Recording state
+    is_recording: bool,
+    is_processing: bool,
+    recording_start: Option<Instant>,
+    audio_buffer: Arc<Mutex<Vec<f32>>>,
+    audio_stream: Option<cpal::Stream>,
+    audio_level: f32,
+    input_sample_rate: u32,
+
+    // Settings
+    show_settings: bool,
+    always_on_top: bool,
+    timer_duration_mins: u32,
+    selected_model: String,
+    available_models: Vec<(String, bool)>, // (name, installed)
+    ollama_enabled: bool,
+
+    // Audio devices
+    audio_devices: Vec<String>,
+    selected_device_idx: usize,
+
+    // Error state
+    error_message: Option<String>,
+    error_time: Option<Instant>,
+
+    // Processing message
+    status_message: Option<String>,
+
+    // Model download state
+    download_state: DownloadState,
+}
+
+impl Default for FlowStateApp {
+    fn default() -> Self {
+        let db = database::Database::new().expect("Failed to open database");
+        let tasks = database::get_all_tasks(&db).unwrap_or_default();
+        let timer_duration_mins = 15;
+        let ollama_enabled = database::get_ollama_enabled(&db).unwrap_or(false);
+
+        // Get audio devices
+        let host = cpal::default_host();
+        let audio_devices: Vec<String> = host
+            .input_devices()
+            .map(|devices| {
+                devices
+                    .filter_map(|d| d.name().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Check whisper models (use same path as whisper module)
+        let models_dir = dirs::data_dir()
+            .unwrap_or_default()
+            .join("flowstate")
+            .join("whisper_models");
+        let available_models = vec![
+            ("tiny", 75),
+            ("base", 142),
+            ("small", 466),
+            ("medium", 1500),
+        ]
+        .into_iter()
+        .map(|(name, _size)| {
+            let model_path = models_dir.join(format!("ggml-{}.bin", name));
+            (name.to_string(), model_path.exists())
+        })
+        .collect();
+
+        Self {
+            db,
+            tasks,
+            timer_start: Instant::now(),
+            timer_duration: Duration::from_secs(timer_duration_mins as u64 * 60),
+            is_recording: false,
+            is_processing: false,
+            recording_start: None,
+            audio_buffer: Arc::new(Mutex::new(Vec::new())),
+            audio_stream: None,
+            audio_level: 0.0,
+            input_sample_rate: 48000, // Default, will be updated when recording starts
+            show_settings: false,
+            always_on_top: false,
+            timer_duration_mins,
+            selected_model: "tiny".to_string(),
+            available_models,
+            ollama_enabled,
+            audio_devices,
+            selected_device_idx: 0,
+            error_message: None,
+            error_time: None,
+            status_message: None,
+            download_state: DownloadState::default(),
+        }
+    }
+}
+
+impl FlowStateApp {
+    fn reload_tasks(&mut self) {
+        self.tasks = database::get_all_tasks(&self.db).unwrap_or_default();
+    }
+
+    fn refresh_models(&mut self) {
+        let models_dir = dirs::data_dir()
+            .unwrap_or_default()
+            .join("flowstate")
+            .join("whisper_models");
+        self.available_models = vec![
+            ("tiny", 75),
+            ("base", 142),
+            ("small", 466),
+            ("medium", 1500),
+        ]
+        .into_iter()
+        .map(|(name, _size)| {
+            let model_path = models_dir.join(format!("ggml-{}.bin", name));
+            (name.to_string(), model_path.exists())
+        })
+        .collect();
+    }
+
+    fn start_download(&mut self, model_name: &str) {
+        let state = self.download_state.clone();
+        let model = model_name.to_string();
+
+        // Set downloading state
+        *state.is_downloading.lock().unwrap() = true;
+        *state.current_model.lock().unwrap() = Some(model.clone());
+        *state.progress.lock().unwrap() = 0.0;
+        *state.downloaded_mb.lock().unwrap() = 0.0;
+        *state.error.lock().unwrap() = None;
+        *state.completed.lock().unwrap() = false;
+
+        // Get model URL and size
+        let (url, total_size) = match model.as_str() {
+            "tiny" => ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin", 75_000_000u64),
+            "base" => ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin", 142_000_000u64),
+            "small" => ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin", 466_000_000u64),
+            "medium" => ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin", 1_500_000_000u64),
+            _ => {
+                *state.error.lock().unwrap() = Some("Unknown model".to_string());
+                *state.is_downloading.lock().unwrap() = false;
+                return;
+            }
+        };
+
+        *state.total_mb.lock().unwrap() = total_size as f32 / 1_000_000.0;
+
+        let url = url.to_string();
+
+        // Download in background thread
+        thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let models_dir = dirs::data_dir()
+                    .unwrap_or_default()
+                    .join("flowstate")
+                    .join("whisper_models");
+
+                if let Err(e) = std::fs::create_dir_all(&models_dir) {
+                    *state.error.lock().unwrap() = Some(format!("Failed to create directory: {}", e));
+                    *state.is_downloading.lock().unwrap() = false;
+                    return;
+                }
+
+                let model_path = models_dir.join(format!("ggml-{}.bin", model));
+
+                // Download with reqwest
+                let client = reqwest::Client::new();
+                let response = match client.get(&url).send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        *state.error.lock().unwrap() = Some(format!("Download failed: {}", e));
+                        *state.is_downloading.lock().unwrap() = false;
+                        return;
+                    }
+                };
+
+                if !response.status().is_success() {
+                    *state.error.lock().unwrap() = Some(format!("HTTP error: {}", response.status()));
+                    *state.is_downloading.lock().unwrap() = false;
+                    return;
+                }
+
+                let total = response.content_length().unwrap_or(total_size);
+                *state.total_mb.lock().unwrap() = total as f32 / 1_000_000.0;
+
+                let mut file = match std::fs::File::create(&model_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        *state.error.lock().unwrap() = Some(format!("Failed to create file: {}", e));
+                        *state.is_downloading.lock().unwrap() = false;
+                        return;
+                    }
+                };
+
+                use futures_util::StreamExt;
+                use std::io::Write;
+
+                let mut stream = response.bytes_stream();
+                let mut downloaded: u64 = 0;
+
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(bytes) => {
+                            if let Err(e) = file.write_all(&bytes) {
+                                *state.error.lock().unwrap() = Some(format!("Write error: {}", e));
+                                *state.is_downloading.lock().unwrap() = false;
+                                return;
+                            }
+                            downloaded += bytes.len() as u64;
+                            *state.downloaded_mb.lock().unwrap() = downloaded as f32 / 1_000_000.0;
+                            *state.progress.lock().unwrap() = downloaded as f32 / total as f32;
+                        }
+                        Err(e) => {
+                            *state.error.lock().unwrap() = Some(format!("Download error: {}", e));
+                            *state.is_downloading.lock().unwrap() = false;
+                            return;
+                        }
+                    }
+                }
+
+                *state.completed.lock().unwrap() = true;
+                *state.is_downloading.lock().unwrap() = false;
+            });
+        });
+    }
+
+    fn start_recording(&mut self) {
+        let host = cpal::default_host();
+        let device = if self.selected_device_idx == 0 {
+            host.default_input_device()
+        } else {
+            host.input_devices()
+                .ok()
+                .and_then(|mut devices| devices.nth(self.selected_device_idx - 1))
+        };
+
+        let Some(device) = device else {
+            self.error_message = Some("No audio device found".to_string());
+            self.error_time = Some(Instant::now());
+            return;
+        };
+
+        let config = match device.default_input_config() {
+            Ok(c) => c,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to get audio config: {}", e));
+                self.error_time = Some(Instant::now());
+                return;
+            }
+        };
+
+        let buffer = self.audio_buffer.clone();
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels() as usize;
+
+        // Store sample rate for resampling later
+        self.input_sample_rate = sample_rate;
+        eprintln!("🎤 Recording at {} Hz, {} channels", sample_rate, channels);
+
+        // Clear buffer
+        buffer.lock().unwrap().clear();
+
+        let stream = match device.build_input_stream(
+            &config.into(),
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mut buf = buffer.lock().unwrap();
+                // Convert to mono and resample to 16kHz
+                let mono: Vec<f32> = data
+                    .chunks(channels)
+                    .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
+                    .collect();
+                buf.extend(mono);
+            },
+            |err| eprintln!("Audio error: {}", err),
+            None,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                self.error_message = Some(format!("Failed to start recording: {}", e));
+                self.error_time = Some(Instant::now());
+                return;
+            }
+        };
+
+        if let Err(e) = stream.play() {
+            self.error_message = Some(format!("Failed to play stream: {}", e));
+            self.error_time = Some(Instant::now());
+            return;
+        }
+
+        self.audio_stream = Some(stream);
+        self.is_recording = true;
+        self.recording_start = Some(Instant::now());
+    }
+
+    fn stop_recording(&mut self) {
+        self.is_recording = false;
+        self.audio_stream = None;
+        self.recording_start = None;
+
+        // Get audio data
+        let audio_data: Vec<f32> = {
+            let buf = self.audio_buffer.lock().unwrap();
+            buf.clone()
+        };
+
+        if audio_data.is_empty() {
+            self.error_message = Some("No audio recorded".to_string());
+            self.error_time = Some(Instant::now());
+            return;
+        }
+
+        self.is_processing = true;
+        self.status_message = Some("Processing...".to_string());
+
+        // Process in background (simplified - in production use tokio)
+        let model = self.selected_model.clone();
+        let ollama_enabled = self.ollama_enabled;
+
+        // Downsample to 16kHz using actual input sample rate
+        let input_rate = self.input_sample_rate as f32;
+        let output_rate = 16000.0;
+        eprintln!("🔄 Resampling from {} Hz to {} Hz ({} samples)", input_rate, output_rate, audio_data.len());
+
+        let resampled = if (input_rate - output_rate).abs() < 1.0 {
+            // Already at 16kHz, no resampling needed
+            audio_data
+        } else {
+            let ratio = input_rate / output_rate;
+            let new_len = (audio_data.len() as f32 / ratio) as usize;
+            let mut resampled = Vec::with_capacity(new_len);
+            for i in 0..new_len {
+                let src_idx = i as f32 * ratio;
+                let idx = src_idx as usize;
+                let frac = src_idx - idx as f32;
+
+                // Linear interpolation for smoother resampling
+                let sample = if idx + 1 < audio_data.len() {
+                    audio_data[idx] * (1.0 - frac) + audio_data[idx + 1] * frac
+                } else if idx < audio_data.len() {
+                    audio_data[idx]
+                } else {
+                    0.0
+                };
+                resampled.push(sample);
+            }
+            resampled
+        };
+
+        eprintln!("📊 Resampled to {} samples", resampled.len());
+
+        // Transcribe
+        match whisper::transcribe_audio(&resampled, &model) {
+            Ok(transcript) => {
+                eprintln!("📝 Transcript: '{}'", transcript);
+
+                // Check for empty transcript
+                if transcript.trim().is_empty() {
+                    self.error_message = Some("No speech detected. Try speaking louder or closer to the mic.".to_string());
+                    self.error_time = Some(Instant::now());
+                    self.is_processing = false;
+                    return;
+                }
+
+                self.status_message = Some(format!("Transcribed: {}", transcript));
+
+                // Parse and add tasks
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                match rt.block_on(ollama::parse_transcript(&transcript, ollama_enabled)) {
+                    Ok(parsed_tasks) => {
+                        eprintln!("✅ Parsed {} tasks", parsed_tasks.len());
+                        if parsed_tasks.is_empty() {
+                            self.error_message = Some(format!("No tasks found in: '{}'", transcript));
+                            self.error_time = Some(Instant::now());
+                        } else {
+                            for task in &parsed_tasks {
+                                eprintln!("  → Adding task: '{}' (completed: {})", task.text, task.completed);
+                                if task.completed {
+                                    let _ = database::find_and_complete_task(&self.db, &task.text);
+                                } else {
+                                    let _ = database::add_task(&self.db, &task.text);
+                                }
+                            }
+                            self.reload_tasks();
+                        }
+                        self.status_message = None;
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("Parse error: {}", e));
+                        self.error_time = Some(Instant::now());
+                    }
+                }
+            }
+            Err(e) => {
+                self.error_message = Some(format!("Transcription error: {}", e));
+                self.error_time = Some(Instant::now());
+            }
+        }
+
+        self.is_processing = false;
+    }
+
+    fn timer_remaining(&self) -> Duration {
+        let elapsed = self.timer_start.elapsed();
+        if elapsed >= self.timer_duration {
+            Duration::ZERO
+        } else {
+            self.timer_duration - elapsed
+        }
+    }
+
+    fn reset_timer(&mut self) {
+        self.timer_start = Instant::now();
+        self.timer_duration = Duration::from_secs(self.timer_duration_mins as u64 * 60);
+    }
+}
+
+impl eframe::App for FlowStateApp {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Check timer expiry
+        if self.timer_remaining() == Duration::ZERO && self.timer_duration_mins > 0 {
+            // Play sound (beep)
+            print!("\x07"); // ASCII bell
+            self.reset_timer();
+        }
+
+        // Clear old errors
+        if let Some(error_time) = self.error_time {
+            if error_time.elapsed() > Duration::from_secs(5) {
+                self.error_message = None;
+                self.error_time = None;
+            }
+        }
+
+        // Set always on top
+        // Note: eframe 0.29 doesn't have direct always_on_top, would need platform-specific code
+
+        // Dark theme
+        ctx.set_visuals(egui::Visuals::dark());
+
+        // Timer bar at top
+        egui::TopBottomPanel::top("timer_bar").show(ctx, |ui| {
+            let remaining = self.timer_remaining();
+            let total = self.timer_duration.as_secs_f32();
+            let progress = if total > 0.0 {
+                remaining.as_secs_f32() / total
+            } else {
+                0.0
+            };
+
+            ui.horizontal(|ui| {
+                let bar_width = ui.available_width() - 60.0;
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(bar_width, 4.0),
+                    egui::Sense::hover(),
+                );
+
+                // Background
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(40));
+
+                // Progress
+                let progress_rect = egui::Rect::from_min_size(
+                    rect.min,
+                    egui::vec2(rect.width() * progress, rect.height()),
+                );
+                ui.painter().rect_filled(
+                    progress_rect,
+                    0.0,
+                    egui::Color32::from_rgb(74, 158, 255),
+                );
+
+                // Time text
+                let mins = remaining.as_secs() / 60;
+                let secs = remaining.as_secs() % 60;
+                ui.label(format!("{}:{:02}", mins, secs));
+            });
+        });
+
+        // Main content
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // Header
+            ui.horizontal(|ui| {
+                ui.heading("FlowState");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⚙").clicked() {
+                        self.show_settings = true;
+                    }
+                    let pin_text = if self.always_on_top { "📌" } else { "📍" };
+                    if ui.button(pin_text).clicked() {
+                        self.always_on_top = !self.always_on_top;
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            // Record button
+            ui.vertical_centered(|ui| {
+                let button_size = egui::vec2(80.0, 80.0);
+                let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
+
+                let is_hovered = response.hovered();
+                let bg_color = if self.is_recording {
+                    egui::Color32::from_rgb(239, 68, 68) // Red when recording
+                } else if self.is_processing {
+                    egui::Color32::from_gray(60)
+                } else if is_hovered {
+                    egui::Color32::from_gray(50)
+                } else {
+                    egui::Color32::from_gray(42)
+                };
+
+                ui.painter().circle_filled(rect.center(), 40.0, bg_color);
+
+                // Icon
+                if self.is_processing {
+                    // Spinner would go here - just show text for now
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "...",
+                        egui::FontId::proportional(24.0),
+                        egui::Color32::WHITE,
+                    );
+                } else if self.is_recording {
+                    // Stop icon (square)
+                    let square_size = 20.0;
+                    let square_rect = egui::Rect::from_center_size(
+                        rect.center(),
+                        egui::vec2(square_size, square_size),
+                    );
+                    ui.painter().rect_filled(square_rect, 2.0, egui::Color32::WHITE);
+                } else {
+                    // Record icon (circle)
+                    ui.painter().circle_filled(rect.center(), 20.0, egui::Color32::WHITE);
+                }
+
+                // Handle mouse down/up for hold-to-record
+                if response.is_pointer_button_down_on() && !self.is_recording && !self.is_processing {
+                    self.start_recording();
+                }
+                if self.is_recording && !response.is_pointer_button_down_on() {
+                    self.stop_recording();
+                }
+
+                // Recording time / hint
+                if self.is_recording {
+                    if let Some(start) = self.recording_start {
+                        let secs = start.elapsed().as_secs();
+                        ui.label(format!("● Recording {}:{:02}", secs / 60, secs % 60));
+                    }
+                } else if self.is_processing {
+                    ui.label("Processing...");
+                } else {
+                    ui.label(egui::RichText::new("Hold to record").color(egui::Color32::GRAY));
+                }
+            });
+
+            ui.add_space(8.0);
+
+            // Error message
+            if let Some(ref error) = self.error_message {
+                ui.colored_label(egui::Color32::from_rgb(248, 113, 113), error);
+            }
+
+            // Status message
+            if let Some(ref status) = self.status_message {
+                ui.label(status);
+            }
+
+            ui.add_space(8.0);
+
+            // Task list
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let mut tasks_to_toggle = Vec::new();
+                let mut tasks_to_delete = Vec::new();
+
+                for task in &self.tasks {
+                    ui.horizontal(|ui| {
+                        let mut completed = task.completed;
+                        if ui.checkbox(&mut completed, "").changed() {
+                            tasks_to_toggle.push(task.id);
+                        }
+
+                        let text = if task.completed {
+                            egui::RichText::new(&task.text)
+                                .strikethrough()
+                                .color(egui::Color32::GRAY)
+                        } else {
+                            egui::RichText::new(&task.text)
+                        };
+                        ui.label(text);
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").clicked() {
+                                tasks_to_delete.push(task.id);
+                            }
+                        });
+                    });
+                }
+
+                // Apply changes
+                let should_reload = !tasks_to_toggle.is_empty() || !tasks_to_delete.is_empty();
+                for id in tasks_to_toggle {
+                    let _ = database::toggle_task(&self.db, id);
+                }
+                for id in tasks_to_delete {
+                    let _ = database::delete_task(&self.db, id);
+                }
+                if should_reload {
+                    self.reload_tasks();
+                }
+            });
+        });
+
+        // Settings window
+        if self.show_settings {
+            egui::Window::new("Settings")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    // Timer duration
+                    ui.horizontal(|ui| {
+                        ui.label("Timer (minutes):");
+                        if ui.add(egui::Slider::new(&mut self.timer_duration_mins, 0..=60)).changed() {
+                            self.reset_timer();
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Audio device
+                    ui.label("Microphone:");
+                    egui::ComboBox::from_id_salt("audio_device")
+                        .selected_text(
+                            self.audio_devices
+                                .get(self.selected_device_idx)
+                                .cloned()
+                                .unwrap_or_else(|| "Default".to_string())
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.selected_device_idx, 0, "Default");
+                            for (idx, name) in self.audio_devices.iter().enumerate() {
+                                ui.selectable_value(&mut self.selected_device_idx, idx + 1, name);
+                            }
+                        });
+
+                    ui.add_space(8.0);
+
+                    // Whisper model
+                    ui.label("Whisper Model:");
+
+                    // Check if download completed and refresh
+                    if *self.download_state.completed.lock().unwrap() {
+                        self.refresh_models();
+                        *self.download_state.completed.lock().unwrap() = false;
+                    }
+
+                    let is_downloading = *self.download_state.is_downloading.lock().unwrap();
+                    let current_downloading = self.download_state.current_model.lock().unwrap().clone();
+
+                    // Clone available_models to avoid borrow issues
+                    let models_snapshot: Vec<_> = self.available_models.clone();
+                    let mut model_to_download: Option<String> = None;
+
+                    for (name, installed) in &models_snapshot {
+                        ui.horizontal(|ui| {
+                            let selected = self.selected_model == *name;
+                            if ui.radio(selected && *installed, name).clicked() && *installed {
+                                self.selected_model = name.clone();
+                            }
+
+                            let is_this_downloading = current_downloading.as_ref() == Some(name);
+
+                            if *installed {
+                                ui.colored_label(egui::Color32::from_rgb(74, 222, 128), "✓ Installed");
+                            } else if is_this_downloading {
+                                // Show progress
+                                let progress = *self.download_state.progress.lock().unwrap();
+                                let downloaded = *self.download_state.downloaded_mb.lock().unwrap();
+                                let total = *self.download_state.total_mb.lock().unwrap();
+                                ui.add(egui::ProgressBar::new(progress).text(format!("{:.0}/{:.0} MB", downloaded, total)));
+                            } else if !is_downloading {
+                                // Show download button
+                                if ui.small_button("Download").clicked() {
+                                    model_to_download = Some(name.clone());
+                                }
+                            } else {
+                                ui.colored_label(egui::Color32::GRAY, "—");
+                            }
+                        });
+                    }
+
+                    // Start download if requested (after the loop to avoid borrow issues)
+                    if let Some(model) = model_to_download {
+                        self.start_download(&model);
+                    }
+
+                    // Show download error if any
+                    if let Some(ref error) = *self.download_state.error.lock().unwrap() {
+                        ui.colored_label(egui::Color32::from_rgb(248, 113, 113), error);
+                    }
+
+                    ui.add_space(8.0);
+
+                    // Ollama toggle
+                    ui.checkbox(&mut self.ollama_enabled, "Use Ollama for better parsing");
+                    if self.ollama_enabled {
+                        ui.label(egui::RichText::new("Slower but more accurate").small().color(egui::Color32::GRAY));
+                    }
+
+                    ui.add_space(16.0);
+
+                    if ui.button("Close").clicked() {
+                        // Save settings
+                        let _ = database::set_ollama_enabled(&self.db, self.ollama_enabled);
+                        self.show_settings = false;
+                    }
+                });
+        }
+
+        // Only repaint when needed (not continuously!)
+        // This is the key to 0% CPU - we only repaint on events
+        let is_downloading = *self.download_state.is_downloading.lock().unwrap();
+
+        if self.is_recording || is_downloading {
+            // Repaint every 100ms while recording or downloading
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else {
+            // When idle, only repaint every 10 seconds for timer
+            ctx.request_repaint_after(Duration::from_secs(10));
+        }
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([320.0, 480.0])
+            .with_min_inner_size([280.0, 400.0])
+            .with_title("FlowState"),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "FlowState",
+        options,
+        Box::new(|_cc| Ok(Box::new(FlowStateApp::default()))),
+    )
+}
