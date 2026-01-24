@@ -1,4 +1,3 @@
-import React from 'react';
 import './PinIcon.css';
 
 interface PinIconProps {

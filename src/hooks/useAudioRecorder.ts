@@ -120,6 +120,13 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
   const timerIntervalRef = useRef<number | null>(null);
   const isRecordingRef = useRef<boolean>(false);
   const isPausedRef = useRef<boolean>(false);
+  const deviceChangeTimeoutRef = useRef<number | null>(null);
+  const selectedDeviceIdRef = useRef<string | null>(null);
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    selectedDeviceIdRef.current = selectedDeviceId;
+  }, [selectedDeviceId]);
 
   // Load available audio input devices
   const refreshDevices = useCallback(async () => {
@@ -127,7 +134,7 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
       // Request permission first to get device labels
       await navigator.mediaDevices.getUserMedia({ audio: true })
         .then(stream => stream.getTracks().forEach(track => track.stop()));
-      
+
       const devices = await navigator.mediaDevices.enumerateDevices();
       const audioInputs = devices
         .filter(device => device.kind === 'audioinput')
@@ -135,38 +142,47 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
           deviceId: device.deviceId,
           label: device.label || `Microphone ${device.deviceId.slice(0, 8)}`,
         }));
-      
+
       setAvailableDevices(audioInputs);
-      
-      // Set default device if none selected
-      if (!selectedDeviceId && audioInputs.length > 0) {
-        // Try to find 'default' device, otherwise use first
+
+      // Set default device if none selected (use ref to avoid dependency)
+      if (!selectedDeviceIdRef.current && audioInputs.length > 0) {
         const defaultDevice = audioInputs.find(d => d.deviceId === 'default') || audioInputs[0];
         setSelectedDeviceId(defaultDevice.deviceId);
       }
     } catch (err) {
-      console.error('Failed to enumerate audio devices:', err);
+      // Only log actual errors, not permission issues
+      if (err instanceof Error && !err.message.includes('Permission')) {
+        console.error('Failed to enumerate audio devices:', err);
+      }
     }
-  }, [selectedDeviceId]);
+  }, []);
 
-  // Load devices on mount
+  // Load devices on mount (only once)
   useEffect(() => {
     refreshDevices();
-    
-    // Listen for device changes (e.g., plugging in a new microphone)
+
+    // Listen for device changes with debouncing to avoid rapid re-enumeration
     const handleDeviceChange = () => {
-      refreshDevices();
+      if (deviceChangeTimeoutRef.current) {
+        clearTimeout(deviceChangeTimeoutRef.current);
+      }
+      deviceChangeTimeoutRef.current = window.setTimeout(() => {
+        refreshDevices();
+      }, 500);
     };
     navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
-    
+
     return () => {
       navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
+      if (deviceChangeTimeoutRef.current) {
+        clearTimeout(deviceChangeTimeoutRef.current);
+      }
     };
   }, [refreshDevices]);
 
   const updateAudioLevel = useCallback(() => {
     if (!analyserRef.current) {
-      console.warn('updateAudioLevel: analyser not available');
       return;
     }
 
@@ -208,27 +224,6 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
     // Use the maximum of RMS and peak, with a minimum threshold
     const normalizedLevel = Math.max(rmsLevel, peakLevel * 0.5);
 
-    // Debug logging (log more frequently during recording to diagnose)
-    const shouldLog = Math.random() < 0.05 || normalizedLevel > 1; // Log 5% of time or when there's actual audio
-    if (shouldLog) {
-      console.log('Audio level:', {
-        rms: rms.toFixed(4),
-        peakAmplitude: peakAmplitude.toFixed(4),
-        peakToPeak,
-        rmsLevel: rmsLevel.toFixed(1),
-        peakLevel: peakLevel.toFixed(1),
-        normalizedLevel: normalizedLevel.toFixed(1),
-        sampleRange: `${minSample}-${maxSample}`,
-        nonSilentSamples: `${nonSilentSamples}/${bufferLength}`,
-        bufferLength,
-      });
-      
-      // Warn if we're getting silence
-      if (peakToPeak < 5 && nonSilentSamples < bufferLength * 0.01) {
-        console.warn('⚠️ Very low audio signal detected - microphone may not be receiving audio data');
-      }
-    }
-
     setState((prev) => ({ ...prev, audioLevel: normalizedLevel }));
 
     // Continue animation frame if still recording (use refs to avoid stale closure)
@@ -265,7 +260,6 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
       } catch (err) {
         // If exact device fails, try without device constraint
         if (selectedDeviceId && selectedDeviceId !== 'default') {
-          console.warn('Failed with specific device, trying default device...');
           stream = await navigator.mediaDevices.getUserMedia({
             audio: {
               channelCount: 1,
@@ -283,41 +277,20 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
 
       // Verify stream is active and force enable if needed
       const audioTracks = stream.getAudioTracks();
-      console.log('Audio tracks:', audioTracks.length);
-      audioTracks.forEach((track, index) => {
-        console.log(`Track ${index} (before fix):`, {
-          enabled: track.enabled,
-          muted: track.muted,
-          readyState: track.readyState,
-          label: track.label,
-          settings: track.getSettings(),
-        });
-        
+      audioTracks.forEach((track) => {
         // Force enable the track (Kaspersky might disable it)
         if (!track.enabled) {
-          console.warn(`Track ${index} is disabled, attempting to enable...`);
           track.enabled = true;
         }
-        
+
         // Monitor mute state changes (Kaspersky might mute it after creation)
         track.onmute = () => {
-          console.error(`Track ${index} was muted! This is likely Kaspersky blocking.`);
           setError('Microphone was muted. Please allow microphone access in Kaspersky and check "Remember my choice".');
         };
-        
-        track.onunmute = () => {
-          console.log(`Track ${index} was unmuted.`);
-        };
-        
+
         // Check again after a short delay (Kaspersky might mute it asynchronously)
         setTimeout(() => {
-          console.log(`Track ${index} (after delay):`, {
-            enabled: track.enabled,
-            muted: track.muted,
-            readyState: track.readyState,
-          });
           if (track.muted) {
-            console.error('Track is muted - Kaspersky is likely blocking microphone access');
             setError('Microphone is muted. Please allow microphone access in Kaspersky and check "Remember my choice for this sequence".');
           }
         }, 500);
@@ -331,7 +304,6 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
       // Resume audio context if suspended (browser autoplay policy)
       if (audioContext.state === 'suspended') {
         await audioContext.resume();
-        console.log('AudioContext resumed from suspended state');
       }
 
       const source = audioContext.createMediaStreamSource(stream);
@@ -340,8 +312,6 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
       analyser.smoothingTimeConstant = 0.3; // Lower smoothing for more responsive visualization
       source.connect(analyser);
       analyserRef.current = analyser;
-      
-      console.log('Analyser connected, fftSize:', analyser.fftSize, 'frequencyBinCount:', analyser.frequencyBinCount, 'AudioContext state:', audioContext.state);
 
       // Create MediaRecorder
       const mediaRecorder = new MediaRecorder(stream, {
@@ -370,14 +340,13 @@ export const useAudioRecorder = (): UseAudioRecorderReturn => {
         
         // Check if track got muted (Kaspersky might mute it after recording starts)
         const tracks = streamRef.current?.getAudioTracks() || [];
-        tracks.forEach((track, idx) => {
+        tracks.forEach((track) => {
           if (track.muted && track.readyState === 'live') {
-            console.warn(`Track ${idx} is muted during recording - Kaspersky may have blocked it`);
-            // Try to unmute (may not work if Kaspersky is blocking)
+            // Try to re-enable (may not work if Kaspersky is blocking)
             try {
               track.enabled = true;
-            } catch (e) {
-              console.error('Failed to re-enable track:', e);
+            } catch {
+              // Ignore - user will see error via onmute handler
             }
           }
         });

@@ -1,69 +1,68 @@
 .model-manager {
-  padding: 20px;
-  background: #1a1a1a;
+  padding: 0;
+  background: transparent;
   color: #e0e0e0;
-  max-width: 500px;
-  margin: 0 auto;
 }
 
 .loading-models {
-  padding: 20px;
+  padding: 12px;
   text-align: center;
   color: #888;
-  font-size: 14px;
+  font-size: 12px;
 }
 
 .model-manager h2 {
-  margin: 0 0 8px 0;
-  font-size: 20px;
+  margin: 0 0 6px 0;
+  font-size: 14px;
+  font-weight: 600;
   color: #ffffff;
 }
 
 .model-manager-description {
-  margin: 0 0 20px 0;
-  font-size: 13px;
+  margin: 0 0 12px 0;
+  font-size: 11px;
   color: #888;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 .models-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-bottom: 20px;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
 .model-item {
   background: #2a2a2a;
-  border-radius: 8px;
-  padding: 16px;
+  border-radius: 6px;
+  padding: 10px 12px;
   border: 1px solid #333;
 }
 
 .model-info {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .model-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
 
 .model-name {
   font-weight: 600;
-  font-size: 16px;
+  font-size: 13px;
   color: #ffffff;
 }
 
 .model-size {
-  font-size: 13px;
+  font-size: 11px;
   color: #888;
 }
 
 .model-status {
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .status-installed {
@@ -76,16 +75,16 @@
 
 .model-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 
 .btn-download,
 .btn-select,
 .btn-delete {
-  padding: 8px 16px;
+  padding: 6px 12px;
   border: none;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
@@ -131,16 +130,16 @@
 }
 
 .download-progress {
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 .progress-bar {
   width: 100%;
-  height: 8px;
+  height: 6px;
   background: #333;
-  border-radius: 4px;
+  border-radius: 3px;
   overflow: hidden;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
 }
 
 .progress-fill {
@@ -156,7 +155,7 @@
 }
 
 .model-note {
-  padding: 12px;
+  padding: 8px 10px;
   background: #2a2a2a;
   border-radius: 6px;
   border-left: 3px solid #4a9eff;
@@ -164,9 +163,9 @@
 
 .model-note p {
   margin: 0;
-  font-size: 12px;
+  font-size: 11px;
   color: #aaa;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 .model-note strong {
@@ -174,27 +173,27 @@
 }
 
 .model-warning-note {
-  margin-top: 16px;
-  padding: 16px;
+  margin-top: 8px;
+  padding: 10px 12px;
   background: rgba(251, 191, 36, 0.1);
-  border-radius: 8px;
+  border-radius: 6px;
   border: 1px solid rgba(251, 191, 36, 0.3);
   border-left: 3px solid #fbbf24;
 }
 
 .model-warning-note p {
   margin: 0;
-  font-size: 13px;
+  font-size: 11px;
   color: #e0e0e0;
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 .model-warning-note ol {
-  margin: 12px 0 0 0;
-  padding-left: 20px;
-  font-size: 12px;
+  margin: 6px 0 0 0;
+  padding-left: 18px;
+  font-size: 11px;
   color: #aaa;
-  line-height: 1.8;
+  line-height: 1.5;
 }
 
 .model-warning-note a {

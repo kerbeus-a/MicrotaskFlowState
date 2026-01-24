@@ -61,6 +61,8 @@ fn main() {
             commands::process_voice_recording,
             commands::get_autostart_enabled,
             commands::set_autostart_enabled,
+            commands::get_ollama_enabled,
+            commands::set_ollama_enabled,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

@@ -3,7 +3,8 @@
 
 use std::path::PathBuf;
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(feature = "tauri-ui")]
 use tauri::{AppHandle, Manager};
 use serde::{Deserialize, Serialize};
 use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
@@ -11,7 +12,7 @@ use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingS
 /// Helper functions for Whisper model path management
 pub struct WhisperPaths;
 
-/// Thread-safe cache for WhisperPaths to avoid reloading models on every recording
+/// Thread-safe cache for Whisper model to avoid reloading on every recording
 pub struct WhisperCache {
     engine: Mutex<Option<(WhisperModelSize, Arc<WhisperContext>)>>,
 }
@@ -23,7 +24,50 @@ impl WhisperCache {
         }
     }
 
-    /// Get or create a WhisperContext for the given model size
+    /// Get or create a WhisperContext for the given model size (standalone/native version)
+    pub fn get_or_create_standalone(&self, model_size: WhisperModelSize) -> Result<Arc<WhisperContext>, String> {
+        // Recover from poisoned lock (previous panic) by clearing it
+        let mut guard = self.engine.lock().unwrap_or_else(|poisoned| {
+            eprintln!("⚠️ Recovering from poisoned lock, clearing cache...");
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            guard
+        });
+
+        // Check if we already have the right model loaded
+        if let Some((cached_size, ref ctx)) = *guard {
+            if cached_size == model_size {
+                eprintln!("✅ Using cached Whisper model");
+                return Ok(Arc::clone(ctx));
+            }
+        }
+
+        // Need to load a new model
+        let model_path = WhisperPaths::get_model_path_standalone(model_size);
+
+        if !model_path.exists() {
+            return Err(format!(
+                "Model {} not found. Please download it first from Settings.",
+                model_size.filename()
+            ));
+        }
+
+        eprintln!("🔄 Loading Whisper model: {} (this may take a moment...)", model_size.filename());
+
+        let ctx = WhisperContext::new_with_params(
+            model_path.to_str().ok_or("Invalid model path")?,
+            WhisperContextParameters::default(),
+        ).map_err(|e| format!("Failed to load Whisper model: {}", e))?;
+
+        let ctx = Arc::new(ctx);
+        *guard = Some((model_size, Arc::clone(&ctx)));
+
+        eprintln!("✅ Whisper model loaded and cached!");
+        Ok(ctx)
+    }
+
+    #[cfg(feature = "tauri-ui")]
+    /// Get or create a WhisperContext for the given model size (Tauri version)
     pub fn get_or_create(&self, app: &AppHandle, model_size: WhisperModelSize) -> Result<Arc<WhisperContext>, String> {
         // Recover from poisoned lock (previous panic) by clearing it
         let mut guard = self.engine.lock().unwrap_or_else(|poisoned| {
@@ -61,7 +105,7 @@ impl WhisperCache {
         let ctx = Arc::new(ctx);
         *guard = Some((model_size, Arc::clone(&ctx)));
 
-        eprintln!("✅ Whisper model loaded successfully!");
+        eprintln!("✅ Whisper model loaded and cached!");
         Ok(ctx)
     }
 
@@ -74,6 +118,13 @@ impl WhisperCache {
         }
         eprintln!("🗑️ Whisper cache cleared");
     }
+}
+
+/// Global cache for native UI (avoids reloading model on every recording)
+static NATIVE_CACHE: OnceLock<WhisperCache> = OnceLock::new();
+
+fn get_native_cache() -> &'static WhisperCache {
+    NATIVE_CACHE.get_or_init(WhisperCache::new)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +181,28 @@ impl WhisperModelSize {
 }
 
 impl WhisperPaths {
+    /// Get models directory without Tauri
+    pub fn get_models_dir_standalone() -> Result<PathBuf, String> {
+        let app_data_dir = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("flowstate");
+
+        let models_dir = app_data_dir.join("whisper_models");
+        std::fs::create_dir_all(&models_dir)
+            .map_err(|e| format!("Failed to create models directory: {}", e))?;
+
+        Ok(models_dir)
+    }
+
+    /// Get model path without Tauri
+    pub fn get_model_path_standalone(model_size: WhisperModelSize) -> PathBuf {
+        let models_dir = Self::get_models_dir_standalone().unwrap_or_else(|_| {
+            std::env::temp_dir().join("flowstate_models")
+        });
+        models_dir.join(model_size.filename())
+    }
+
+    #[cfg(feature = "tauri-ui")]
     pub fn get_models_dir(app: &AppHandle) -> Result<PathBuf, String> {
         let app_data_dir = app.path()
             .app_data_dir()
@@ -142,6 +215,7 @@ impl WhisperPaths {
         Ok(models_dir)
     }
 
+    #[cfg(feature = "tauri-ui")]
     pub fn get_model_path(app: &AppHandle, model_size: WhisperModelSize) -> PathBuf {
         let models_dir = Self::get_models_dir(app).unwrap_or_else(|_| {
             std::env::temp_dir().join("flowstate_models")
@@ -244,7 +318,51 @@ fn resample(samples: &[f32], from_rate: usize, to_rate: usize) -> Vec<f32> {
     resampled
 }
 
+/// Transcribe raw audio samples (for native UI without Tauri)
+/// Uses a global cache to avoid reloading the model on every recording
+pub fn transcribe_audio(samples: &[f32], model_name: &str) -> Result<String, String> {
+    let model_size = WhisperModelSize::from_str(model_name)
+        .ok_or_else(|| format!("Unknown model: {}", model_name))?;
+
+    // Use cached model (only loads once per model size)
+    let ctx = get_native_cache().get_or_create_standalone(model_size)?;
+
+    // Create whisper state
+    let mut state = ctx.create_state()
+        .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
+
+    // Set up parameters
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_language(None); // Auto-detect language (supports Russian, English, etc.)
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_suppress_blank(true);
+    params.set_single_segment(false);
+
+    // Run transcription
+    state.full(params, samples)
+        .map_err(|e| format!("Transcription failed: {}", e))?;
+
+    // Collect results
+    let num_segments = state.full_n_segments()
+        .map_err(|e| format!("Failed to get segments: {}", e))?;
+
+    let mut transcript = String::new();
+    for i in 0..num_segments {
+        if let Ok(segment) = state.full_get_segment_text(i) {
+            transcript.push_str(&segment);
+            transcript.push(' ');
+        }
+    }
+
+    eprintln!("✅ Transcribed: {}", transcript.trim());
+    Ok(transcript.trim().to_string())
+}
+
 // Model download functions
+#[cfg(feature = "tauri-ui")]
 pub async fn download_model(
     app: &AppHandle,
     model_size: WhisperModelSize,
@@ -297,11 +415,13 @@ pub async fn download_model(
     Ok(model_path)
 }
 
+#[cfg(feature = "tauri-ui")]
 pub fn check_model_exists(app: &AppHandle, model_size: WhisperModelSize) -> bool {
     let model_path = WhisperPaths::get_model_path(app, model_size);
     model_path.exists()
 }
 
+#[cfg(feature = "tauri-ui")]
 #[allow(dead_code)]
 pub fn list_available_models(app: &AppHandle) -> Vec<(String, bool, u64)> {
     let models = vec![
@@ -319,14 +439,15 @@ pub fn list_available_models(app: &AppHandle) -> Vec<(String, bool, u64)> {
     }).collect()
 }
 
+#[cfg(feature = "tauri-ui")]
 pub fn delete_model(app: &AppHandle, model_size: WhisperModelSize) -> Result<(), String> {
     let model_path = WhisperPaths::get_model_path(app, model_size);
-    
+
     if model_path.exists() {
         fs::remove_file(&model_path)
             .map_err(|e| format!("Failed to delete model: {}", e))?;
     }
-    
+
     Ok(())
 }
 

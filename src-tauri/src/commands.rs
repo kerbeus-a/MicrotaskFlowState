@@ -68,7 +68,8 @@ pub fn toggle_task(id: i64, db: State<Database>) -> Result<TaskResponse, String>
 #[tauri::command]
 pub async fn process_voice_log(transcript: String, db: State<'_, Database>) -> Result<Vec<TaskResponse>, String> {
     // Use local LLM to parse transcript
-    let parsed_tasks: Vec<crate::database::Task> = crate::ollama::parse_transcript(&transcript).await
+    let ollama_enabled = crate::database::get_ollama_enabled(&db).unwrap_or(false);
+    let parsed_tasks: Vec<crate::database::Task> = crate::ollama::parse_transcript(&transcript, ollama_enabled).await
         .map_err(|e| format!("Failed to parse transcript: {}", e))?;
     
     // Update database with parsed tasks
@@ -115,7 +116,7 @@ pub fn reset_timer() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn get_timer_duration(app: AppHandle) -> Result<u64, String> {
+pub fn get_timer_duration(_app: AppHandle) -> Result<u64, String> {
     crate::timer::get_timer_duration_minutes()
         .map_err(|e: String| e)
 }
@@ -390,7 +391,8 @@ pub async fn process_voice_recording(
 
     // Parse transcript for add/complete actions
     eprintln!("📝 Parsing transcript for tasks...");
-    let parsed_tasks = crate::ollama::parse_transcript(&transcript).await
+    let ollama_enabled = crate::database::get_ollama_enabled(&db).unwrap_or(false);
+    let parsed_tasks = crate::ollama::parse_transcript(&transcript, ollama_enabled).await
         .map_err(|e| format!("Failed to parse transcript: {}", e))?;
     eprintln!("✅ Found {} tasks", parsed_tasks.len());
 
@@ -556,4 +558,16 @@ pub fn set_autostart_enabled(enabled: bool) -> Result<(), String> {
         let _ = enabled;
         Err("Auto-start is only supported on Windows".to_string())
     }
+}
+
+#[tauri::command]
+pub fn get_ollama_enabled(db: State<Database>) -> Result<bool, String> {
+    crate::database::get_ollama_enabled(&db)
+        .map_err(|e: rusqlite::Error| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_ollama_enabled(enabled: bool, db: State<Database>) -> Result<(), String> {
+    crate::database::set_ollama_enabled(&db, enabled)
+        .map_err(|e: rusqlite::Error| e.to_string())
 }

@@ -26,6 +26,7 @@ function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [timerRemaining, setTimerRemaining] = useState(900); // 15 minutes in seconds
+  const [timerDuration, setTimerDuration] = useState(15); // minutes
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [hasWhisperModel, setHasWhisperModel] = useState<boolean | null>(null);
@@ -35,17 +36,8 @@ function App() {
   // Audio recorder hook
   const audioRecorder = useAudioRecorder();
 
-  // Debug: Log when microphone devices are available
-  useEffect(() => {
-    if (audioRecorder.availableDevices.length > 0) {
-      console.log('Microphone devices available:', audioRecorder.availableDevices);
-      console.log('Selected device:', audioRecorder.selectedDeviceId);
-      console.log('Test Mic button should be visible when not recording');
-    }
-  }, [audioRecorder.availableDevices, audioRecorder.selectedDeviceId, audioRecorder.state.isRecording]);
-
   // Window state persistence
-  const windowStateSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const windowStateSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!isTauri) {
@@ -73,9 +65,13 @@ function App() {
     restoreWindowState();
 
     loadTasks();
-    updateTimer();
+    syncTimer(); // Initial sync only
     checkWhisperModels();
-    const interval = setInterval(updateTimer, 1000);
+
+    // Local countdown - update every 10 seconds to minimize CPU usage
+    const interval = setInterval(() => {
+      setTimerRemaining(prev => (prev > 0 ? prev - 10 : prev));
+    }, 10000);
 
     // Save window state on move/resize (debounced)
     const saveWindowState = async () => {
@@ -105,13 +101,24 @@ function App() {
     });
 
     // Listen for timer alerts
-    const unlisten = listen("timer-alert", () => {
+    const unlisten = listen("timer-alert", async () => {
       playChime();
       // Visual pulse effect
       document.body.style.animation = "pulse 0.5s";
       setTimeout(() => {
         document.body.style.animation = "";
       }, 500);
+      // Sync timer after alert (backend resets it)
+      try {
+        const [remaining, duration] = await Promise.all([
+          invoke<number>("get_timer_status"),
+          invoke<number>("get_timer_duration"),
+        ]);
+        setTimerRemaining(remaining);
+        setTimerDuration(duration);
+      } catch {
+        // Ignore sync errors
+      }
     });
 
     // Listen for start-recording event (from global shortcut)
@@ -143,7 +150,6 @@ function App() {
       if (hasModel) {
         const firstInstalled = installedModels[0];
         setSelectedModel(firstInstalled.name.toLowerCase());
-        console.log(`Using Whisper model: ${firstInstalled.name}`);
       } else {
         // Show settings if no model is installed
         setTimeout(() => setShowSettings(true), 1000);
@@ -163,11 +169,16 @@ function App() {
     }
   };
 
-  const updateTimer = async () => {
+  // Sync timer with backend (only called on mount and after reset)
+  const syncTimer = async () => {
     if (!isTauri) return;
     try {
-      const remaining = await invoke<number>("get_timer_status");
+      const [remaining, duration] = await Promise.all([
+        invoke<number>("get_timer_status"),
+        invoke<number>("get_timer_duration"),
+      ]);
       setTimerRemaining(remaining);
+      setTimerDuration(duration);
     } catch (error) {
       console.error("Failed to get timer status:", error);
     }
@@ -199,16 +210,13 @@ function App() {
       const audioData = Array.from(new Uint8Array(arrayBuffer));
 
       // Process with backend
-      const updatedTasks = await invoke<Task[]>("process_voice_recording", {
+      await invoke("process_voice_recording", {
         audioData,
         modelName: selectedModel,
       });
 
       // Reload tasks to get the latest
       await loadTasks();
-
-      // Show success feedback
-      console.log("Voice recording processed successfully:", updatedTasks);
     } catch (error) {
       console.error("Failed to process voice recording:", error);
       let errorMessage = error instanceof Error ? error.message : String(error);
@@ -291,8 +299,7 @@ function App() {
     }
     try {
       const newValue = !alwaysOnTop;
-      const result = await invoke("set_always_on_top", { alwaysOnTop: newValue });
-      console.log("Always on top result:", result);
+      await invoke("set_always_on_top", { alwaysOnTop: newValue });
       setAlwaysOnTop(newValue);
     } catch (error) {
       console.error("Failed to toggle always on top:", error);
@@ -329,7 +336,7 @@ function App() {
 
   return (
     <div className="app">
-      <TimerBar remaining={timerRemaining} />
+      <TimerBar remaining={timerRemaining} duration={timerDuration} />
       <div className="app-content">
         <div className="header">
           <h1>FlowState</h1>

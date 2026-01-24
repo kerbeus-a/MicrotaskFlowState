@@ -16,8 +16,9 @@ pub fn setup_awareness_timer(app: AppHandle) {
     // This is a simplified version - in production, you'd use WTSSESSION_UNLOCK
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            
+            // Check every 10 seconds to minimize CPU usage
+            tokio::time::sleep(Duration::from_secs(10)).await;
+
             if let Ok(remaining) = get_remaining_time() {
                 if remaining == 0 {
                     // Timer expired - trigger alert

@@ -26,11 +26,11 @@ struct ParsedTaskAction {
 }
 
 // Legacy format (keeping for backwards compatibility)
-#[derive(Debug, Serialize, Deserialize)]
-struct ParsedTask {
-    text: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedTask {
+    pub text: String,
     #[serde(default)]
-    completed: bool,
+    pub completed: bool,
 }
 
 // Action types that can be extracted from voice commands
@@ -401,11 +401,9 @@ Return ONLY valid JSON array of strings:"#,
     serde_json::from_str(json_str).map_err(|e| e.to_string())
 }
 
-pub async fn parse_transcript(transcript: &str) -> Result<Vec<Task>, String> {
-    // Ollama is disabled by default for instant response
-    // Set USE_OLLAMA=true to enable Ollama parsing
-    let use_ollama = std::env::var("USE_OLLAMA").unwrap_or_else(|_| "false".to_string());
-    if use_ollama.to_lowercase() != "true" && use_ollama != "1" {
+pub async fn parse_transcript(transcript: &str, ollama_enabled: bool) -> Result<Vec<Task>, String> {
+    // Check if Ollama is enabled (from database setting)
+    if !ollama_enabled {
         eprintln!("⚡ Using simple parser (fast mode)");
         return Ok(parse_transcript_simple(transcript));
     }

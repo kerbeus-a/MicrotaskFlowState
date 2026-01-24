@@ -31,14 +31,16 @@ export default function SettingsModal({
   const [autoStartEnabled, setAutoStartEnabled] = useState<boolean>(false);
   const [autoStartLoading, setAutoStartLoading] = useState<boolean>(false);
   const [timerDuration, setTimerDuration] = useState<number>(15);
-  const [timerDurationLoading, setTimerDurationLoading] = useState<boolean>(false);
-  const timerSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [ollamaEnabled, setOllamaEnabled] = useState<boolean>(false);
+  const [ollamaEnabledLoading, setOllamaEnabledLoading] = useState<boolean>(false);
+  const timerSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       checkOllamaStatus();
       checkAutoStartStatus();
       loadTimerDuration();
+      checkOllamaEnabled();
     }
   }, [isOpen]);
 
@@ -91,6 +93,26 @@ export default function SettingsModal({
       console.error("Failed to toggle auto-start:", error);
     }
     setAutoStartLoading(false);
+  };
+
+  const checkOllamaEnabled = async () => {
+    try {
+      const enabled = await invoke<boolean>("get_ollama_enabled");
+      setOllamaEnabled(enabled);
+    } catch (error) {
+      console.error("Failed to check Ollama enabled status:", error);
+    }
+  };
+
+  const toggleOllamaEnabled = async () => {
+    setOllamaEnabledLoading(true);
+    try {
+      await invoke("set_ollama_enabled", { enabled: !ollamaEnabled });
+      setOllamaEnabled(!ollamaEnabled);
+    } catch (error) {
+      console.error("Failed to toggle Ollama enabled:", error);
+    }
+    setOllamaEnabledLoading(false);
   };
 
   const checkOllamaStatus = async () => {
@@ -204,6 +226,24 @@ export default function SettingsModal({
 
           <div className="settings-section">
             <h3>Ollama (LLM)</h3>
+            <div className="ollama-setting">
+              <label className="toggle-label">
+                <input
+                  type="checkbox"
+                  checked={ollamaEnabled}
+                  onChange={toggleOllamaEnabled}
+                  disabled={ollamaEnabledLoading}
+                />
+                <span className="toggle-text">
+                  Use Ollama for better parsing
+                </span>
+              </label>
+              <p className="status-detail">
+                {ollamaEnabled 
+                  ? "Ollama will be used for more accurate task extraction (slower but better)"
+                  : "Using fast simple parser (instant but less accurate)"}
+              </p>
+            </div>
             <div className="ollama-status">
               {ollamaStatus === "checking" && (
                 <span className="status-text">Checking...</span>

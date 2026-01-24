@@ -56,7 +56,6 @@ export default function RecordButton({
     pointerIdRef.current = null;
     
     // Stop recording on release
-    console.log('Stop handler: Stopping recording');
     onStopRecording();
   }, [isRecording, isProcessing, onStopRecording]);
 
@@ -78,7 +77,6 @@ export default function RecordButton({
     
     // If recording, stop it (fallback mechanism)
     if (isRecording && !isProcessing) {
-      console.log('Click handler: Stopping recording (fallback)');
       isHoldingRef.current = false;
       pointerIdRef.current = null;
       onStopRecording();

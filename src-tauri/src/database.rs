@@ -1,6 +1,7 @@
 use rusqlite::{Connection, Result, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+#[cfg(feature = "tauri-ui")]
 use tauri::{AppHandle, Manager};
 
 pub struct Database {
@@ -16,17 +17,28 @@ pub struct Task {
     pub completed_at: Option<String>,
 }
 
-pub fn init_database(app: &AppHandle) -> Result<Database> {
-    let app_data_dir = app.path()
-        .app_data_dir()
-        .expect("Failed to get app data directory");
+impl Database {
+    /// Create database without Tauri (for native UI)
+    pub fn new() -> Result<Self> {
+        let app_data_dir = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("flowstate");
 
-    std::fs::create_dir_all(&app_data_dir)
-        .expect("Failed to create app data directory");
+        std::fs::create_dir_all(&app_data_dir)
+            .expect("Failed to create app data directory");
 
-    let db_path = app_data_dir.join("flowstate.db");
-    let conn = Connection::open(db_path)?;
-    
+        let db_path = app_data_dir.join("flowstate.db");
+        let conn = Connection::open(db_path)?;
+
+        init_tables(&conn)?;
+
+        Ok(Database {
+            conn: Mutex::new(conn),
+        })
+    }
+}
+
+fn init_tables(conn: &Connection) -> Result<()> {
     // Create tasks table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tasks (
@@ -38,13 +50,45 @@ pub fn init_database(app: &AppHandle) -> Result<Database> {
         )",
         [],
     )?;
-    
+
     // Create index for faster queries
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_completed ON tasks(completed)",
         [],
     )?;
-    
+
+    // Create settings table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    // Set default Ollama enabled to false (fast mode by default)
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ollama_enabled', 'false')",
+        [],
+    )?;
+
+    Ok(())
+}
+
+#[cfg(feature = "tauri-ui")]
+pub fn init_database(app: &AppHandle) -> Result<Database> {
+    let app_data_dir = app.path()
+        .app_data_dir()
+        .expect("Failed to get app data directory");
+
+    std::fs::create_dir_all(&app_data_dir)
+        .expect("Failed to create app data directory");
+
+    let db_path = app_data_dir.join("flowstate.db");
+    let conn = Connection::open(db_path)?;
+
+    init_tables(&conn)?;
+
     Ok(Database {
         conn: Mutex::new(conn),
     })
@@ -231,4 +275,23 @@ pub fn find_and_delete_task(db: &Database, search_text: &str) -> Result<Option<T
     } else {
         Ok(None)
     }
+}
+
+pub fn get_ollama_enabled(db: &Database) -> Result<bool> {
+    let conn = db.conn.lock().unwrap();
+    let value: String = conn.query_row(
+        "SELECT value FROM settings WHERE key = 'ollama_enabled'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or_else(|_| "false".to_string());
+    Ok(value == "true")
+}
+
+pub fn set_ollama_enabled(db: &Database, enabled: bool) -> Result<()> {
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('ollama_enabled', ?1)",
+        params![if enabled { "true" } else { "false" }],
+    )?;
+    Ok(())
 }

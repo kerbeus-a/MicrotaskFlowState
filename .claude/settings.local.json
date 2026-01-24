@@ -8,7 +8,14 @@
       "Bash(where.exe:*)",
       "Bash(powershell -Command:*)",
       "Bash(npm run tauri:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(cargo run:*)",
+      "Bash(start \"\" \"e:\\\\Dev_projects\\\\MicroTask\\\\src-tauri\\\\target\\\\release\\\\flowstate-native.exe\")",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "Bash(powershell -ExecutionPolicy Bypass -File:*)"
     ]
   }
 }

@@ -27,10 +27,7 @@ export default function ModelManager() {
   const [selectedModel, setSelectedModel] = useState<string>("tiny");
 
   useEffect(() => {
-    if (!isTauri) {
-      console.warn("ModelManager: Not running in Tauri, models cannot be loaded");
-      return;
-    }
+    if (!isTauri) return;
 
     loadModels();
 
@@ -48,7 +45,6 @@ export default function ModelManager() {
     if (!isTauri) return;
     try {
       const loadedModels = await invoke<ModelInfo[]>("list_whisper_models");
-      console.log("Loaded models:", loadedModels);
       setModels(loadedModels);
       
       // Set default selected model to first installed one, or tiny

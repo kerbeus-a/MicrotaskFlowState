@@ -2,11 +2,12 @@ import "./TimerBar.css";
 
 interface TimerBarProps {
   remaining: number;
+  duration: number; // in minutes
 }
 
-export default function TimerBar({ remaining }: TimerBarProps) {
-  const totalSeconds = 15 * 60; // 15 minutes
-  const progress = (remaining / totalSeconds) * 100;
+export default function TimerBar({ remaining, duration }: TimerBarProps) {
+  const totalSeconds = duration * 60;
+  const progress = totalSeconds > 0 ? (remaining / totalSeconds) * 100 : 0;
   const minutes = Math.floor(remaining / 60);
   const seconds = remaining % 60;
 
