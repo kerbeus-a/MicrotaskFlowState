@@ -93,7 +93,13 @@ struct FlowStateApp {
 
     // Model download state
     download_state: DownloadState,
+
+    // Manual task entry buffer
+    new_task_text: String,
 }
+
+// Cap manual task input length to keep the DB tidy and avoid pathological inputs.
+const MAX_TASK_LEN: usize = 500;
 
 impl Default for FlowStateApp {
     fn default() -> Self {
@@ -165,8 +171,190 @@ impl Default for FlowStateApp {
             status_message: None,
             processing_rx: None,
             download_state: DownloadState::default(),
+            new_task_text: String::new(),
         }
     }
+}
+
+/// Play a 3-tone chime (C5/E5/G5 major triad) on the default audio output device.
+/// Synthesizes a sine wave with cpal directly so we don't pull in another crate.
+/// Spawned on a background thread - blocks for ~0.8s while playing, then exits.
+/// Failures are logged but never panic; the rest of the app keeps running.
+fn play_chime() {
+    thread::spawn(|| {
+        let host = cpal::default_host();
+        let device = match host.default_output_device() {
+            Some(d) => d,
+            None => {
+                eprintln!("⚠️ chime: no default output device");
+                return;
+            }
+        };
+        let supported = match device.default_output_config() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("⚠️ chime: no default output config: {}", e);
+                return;
+            }
+        };
+        let sample_rate = supported.sample_rate().0 as f32;
+        let channels = supported.channels() as usize;
+        let config: cpal::StreamConfig = supported.config();
+
+        // Triad: C5, E5, G5. Each tone ~220ms with 40ms gap.
+        let tones: [f32; 3] = [523.25, 659.25, 783.99];
+        let tone_samples = (sample_rate * 0.22) as usize;
+        let gap_samples = (sample_rate * 0.04) as usize;
+        let attack_samples = (sample_rate * 0.02) as usize;
+        let peak_gain: f32 = 0.35;
+
+        // Pre-render the chime into a buffer so the audio callback is trivial.
+        let mut buf: Vec<f32> = Vec::with_capacity((tone_samples + gap_samples) * tones.len() * channels);
+        for &freq in &tones {
+            let two_pi_f_over_sr = 2.0 * std::f32::consts::PI * freq / sample_rate;
+            for i in 0..tone_samples {
+                // Linear attack, exponential decay - audible without click.
+                let env = if i < attack_samples {
+                    peak_gain * (i as f32 / attack_samples as f32)
+                } else {
+                    let decay_pos = (i - attack_samples) as f32
+                        / (tone_samples - attack_samples).max(1) as f32;
+                    peak_gain * (-4.0 * decay_pos).exp()
+                };
+                let s = env * (two_pi_f_over_sr * i as f32).sin();
+                for _ in 0..channels {
+                    buf.push(s);
+                }
+            }
+            for _ in 0..gap_samples {
+                for _ in 0..channels {
+                    buf.push(0.0);
+                }
+            }
+        }
+
+        let total_frames = buf.len() / channels.max(1);
+        let buf = Arc::new(buf);
+        let cursor = Arc::new(Mutex::new(0usize));
+        let done = Arc::new(Mutex::new(false));
+        let done_cb = done.clone();
+        let buf_cb = buf.clone();
+        let cursor_cb = cursor.clone();
+
+        let err_fn = |err| eprintln!("⚠️ chime stream error: {}", err);
+        let stream_result = match supported.sample_format() {
+            cpal::SampleFormat::F32 => {
+                let buf_cb = buf_cb.clone();
+                let cursor_cb = cursor_cb.clone();
+                let done_cb = done_cb.clone();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        let mut idx = cursor_cb.lock().unwrap();
+                        for sample in data.iter_mut() {
+                            if *idx < buf_cb.len() {
+                                *sample = buf_cb[*idx];
+                                *idx += 1;
+                            } else {
+                                *sample = 0.0;
+                                if let Ok(mut d) = done_cb.lock() {
+                                    *d = true;
+                                }
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let buf_cb = buf_cb.clone();
+                let cursor_cb = cursor_cb.clone();
+                let done_cb = done_cb.clone();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        let mut idx = cursor_cb.lock().unwrap();
+                        for sample in data.iter_mut() {
+                            if *idx < buf_cb.len() {
+                                // Convert f32 [-1, 1] to i16, clamping to avoid wrap on tiny overshoot.
+                                let v = (buf_cb[*idx] * i16::MAX as f32)
+                                    .clamp(i16::MIN as f32, i16::MAX as f32)
+                                    as i16;
+                                *sample = v;
+                                *idx += 1;
+                            } else {
+                                *sample = 0;
+                                if let Ok(mut d) = done_cb.lock() {
+                                    *d = true;
+                                }
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            cpal::SampleFormat::U16 => {
+                let buf_cb = buf_cb.clone();
+                let cursor_cb = cursor_cb.clone();
+                let done_cb = done_cb.clone();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                        let mut idx = cursor_cb.lock().unwrap();
+                        for sample in data.iter_mut() {
+                            if *idx < buf_cb.len() {
+                                let centered =
+                                    ((buf_cb[*idx] * 0.5 + 0.5) * u16::MAX as f32)
+                                        .clamp(0.0, u16::MAX as f32) as u16;
+                                *sample = centered;
+                                *idx += 1;
+                            } else {
+                                *sample = u16::MAX / 2; // silence in unsigned PCM
+                                if let Ok(mut d) = done_cb.lock() {
+                                    *d = true;
+                                }
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            other => {
+                eprintln!("⚠️ chime: unsupported sample format {:?}, no sound", other);
+                return;
+            }
+        };
+
+        let stream = match stream_result {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("⚠️ chime: build_output_stream failed: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = stream.play() {
+            eprintln!("⚠️ chime: stream play failed: {}", e);
+            return;
+        }
+
+        // Wait for buffer to drain, with a hard cap so we never block forever.
+        let frame_duration = Duration::from_secs_f32(1.0 / sample_rate.max(1.0));
+        let max_wait = frame_duration * (total_frames as u32) + Duration::from_millis(200);
+        let start = Instant::now();
+        while start.elapsed() < max_wait {
+            if *done.lock().unwrap() {
+                // Tail to flush any remaining buffered samples.
+                thread::sleep(Duration::from_millis(80));
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        drop(stream);
+    });
 }
 
 impl FlowStateApp {
@@ -587,8 +775,8 @@ impl eframe::App for FlowStateApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Check timer expiry
         if self.timer_remaining() == Duration::ZERO && self.timer_duration_mins > 0 {
-            // Play sound (beep)
-            print!("\x07"); // ASCII bell
+            // Play 3-tone audible chime through default output device.
+            play_chime();
             self.reset_timer();
         }
 
@@ -805,6 +993,43 @@ impl eframe::App for FlowStateApp {
             if let Some(ref status) = self.status_message {
                 ui.label(status);
             }
+
+            ui.add_space(8.0);
+
+            // Manual task entry: text input + add button
+            ui.horizontal(|ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.new_task_text)
+                        .hint_text("Add a task and press Enter")
+                        .char_limit(MAX_TASK_LEN)
+                        .desired_width(f32::INFINITY),
+                );
+
+                let trimmed = self.new_task_text.trim().to_string();
+                // egui's char_limit caps input at MAX_TASK_LEN chars; this is a defense-in-depth
+                // check using char count (not bytes) so unicode input is treated correctly.
+                let can_submit =
+                    !trimmed.is_empty() && trimmed.chars().count() <= MAX_TASK_LEN;
+                let submitted_via_enter =
+                    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let submitted_via_button = ui
+                    .add_enabled(can_submit, egui::Button::new("+"))
+                    .clicked();
+
+                if can_submit && (submitted_via_enter || submitted_via_button) {
+                    match database::add_task(&self.db, &trimmed) {
+                        Ok(_) => {
+                            self.new_task_text.clear();
+                            self.reload_tasks();
+                            response.request_focus();
+                        }
+                        Err(e) => {
+                            self.error_message = Some(format!("Failed to add task: {}", e));
+                            self.error_time = Some(Instant::now());
+                        }
+                    }
+                }
+            });
 
             ui.add_space(8.0);
 
