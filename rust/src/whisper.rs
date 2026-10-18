@@ -1,16 +1,67 @@
+//! Speech-to-text: on-device whisper.cpp (default) or a remote whisper.cpp HTTP server.
+
 use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex, Once};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-const DEFAULT_WHISPER_URL: &str = "http://192.168.1.14:8080/inference";
+/// Loaded model, kept between recordings so only the first transcription pays the load cost.
+static CONTEXT: LazyLock<Mutex<Option<(PathBuf, WhisperContext)>>> =
+    LazyLock::new(|| Mutex::new(None));
+static LOGGING: Once = Once::new();
+
+/// Transcribe mono 16 kHz samples with a local GGML Whisper model.
+pub fn transcribe_local(model_path: &Path, samples: &[f32]) -> Result<String, String> {
+    if samples.is_empty() {
+        return Err("No audio samples to transcribe".to_string());
+    }
+    // Route whisper.cpp's chatty stdout logging through the (silent) `log` facade.
+    LOGGING.call_once(whisper_rs::install_logging_hooks);
+
+    let mut guard = CONTEXT.lock().map_err(|_| "Whisper engine is unavailable")?;
+    if guard.as_ref().map(|(p, _)| p.as_path()) != Some(model_path) {
+        *guard = None;
+        let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
+            .map_err(|e| format!("Failed to load speech model: {e}"))?;
+        *guard = Some((model_path.to_path_buf(), ctx));
+    }
+    let (_, ctx) = guard.as_ref().unwrap();
+
+    let mut state = ctx
+        .create_state()
+        .map_err(|e| format!("Failed to start speech model: {e}"))?;
+
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get().min(8))
+        .unwrap_or(4) as i32;
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_n_threads(threads);
+    params.set_language(Some("en"));
+    params.set_no_context(true);
+    params.set_no_timestamps(true);
+    params.set_suppress_blank(true);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_special(false);
+    params.set_print_timestamps(false);
+
+    state
+        .full(params, samples)
+        .map_err(|e| format!("Transcription failed: {e}"))?;
+
+    let text: String = state
+        .as_iter()
+        .filter_map(|segment| segment.to_str_lossy().ok().map(|s| s.into_owned()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
 
 #[derive(Debug, Deserialize)]
 struct WhisperJsonResponse {
     text: Option<String>,
-}
-
-fn whisper_url() -> String {
-    std::env::var("WHISPER_URL").unwrap_or_else(|_| DEFAULT_WHISPER_URL.to_string())
 }
 
 fn samples_to_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
@@ -26,8 +77,7 @@ fn samples_to_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, St
         let mut writer = hound::WavWriter::new(&mut cursor, spec)
             .map_err(|e| format!("Failed to create WAV writer: {}", e))?;
         for sample in samples {
-            let clamped = sample.clamp(-1.0, 1.0);
-            let pcm = (clamped * i16::MAX as f32) as i16;
+            let pcm = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
             writer
                 .write_sample(pcm)
                 .map_err(|e| format!("Failed to write WAV sample: {}", e))?;
@@ -40,17 +90,16 @@ fn samples_to_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, St
     Ok(cursor.into_inner())
 }
 
-/// Transcribe raw mono 16 kHz audio samples using a remote whisper.cpp HTTP server.
-///
-/// Default endpoint: http://192.168.1.14:8080/inference
-/// Override with WHISPER_URL if the server uses another address or route.
-pub fn transcribe_audio(samples: &[f32]) -> Result<String, String> {
+/// Transcribe mono 16 kHz samples using a whisper.cpp HTTP server (`/inference` endpoint).
+pub fn transcribe_remote(url: &str, samples: &[f32]) -> Result<String, String> {
     if samples.is_empty() {
         return Err("No audio samples to transcribe".to_string());
     }
+    if url.trim().is_empty() {
+        return Err("No Whisper server URL set. Add one in Settings.".to_string());
+    }
 
     let wav = samples_to_wav_bytes(samples, 16_000)?;
-    let url = whisper_url();
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| format!("Failed to start Whisper HTTP runtime: {}", e))?;
 
@@ -66,7 +115,7 @@ pub fn transcribe_audio(samples: &[f32]) -> Result<String, String> {
             .text("temperature", "0");
 
         let response = reqwest::Client::new()
-            .post(&url)
+            .post(url)
             .multipart(form)
             .timeout(std::time::Duration::from_secs(120))
             .send()
@@ -85,14 +134,9 @@ pub fn transcribe_audio(samples: &[f32]) -> Result<String, String> {
 
         if let Ok(json) = serde_json::from_str::<WhisperJsonResponse>(&body) {
             if let Some(text) = json.text {
-                let text = text.trim().to_string();
-                eprintln!("✅ Remote Whisper transcribed: {}", text);
-                return Ok(text);
+                return Ok(text.trim().to_string());
             }
         }
-
-        let text = body.trim().to_string();
-        eprintln!("✅ Remote Whisper transcribed: {}", text);
-        Ok(text)
+        Ok(body.trim().to_string())
     })
 }

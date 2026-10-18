@@ -18,9 +18,8 @@ pub struct Task {
 impl Database {
     /// Create the native app database.
     pub fn new() -> Result<Self> {
-        let app_data_dir = dirs::data_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("flowstate");
+        let app_data_dir = crate::models::data_dir();
+
 
         std::fs::create_dir_all(&app_data_dir)
             .expect("Failed to create app data directory");
@@ -163,69 +162,41 @@ pub fn toggle_task(db: &Database, id: i64) -> Result<Task> {
 }
 
 pub fn find_and_complete_task(db: &Database, text: &str) -> Result<Task> {
+    // Fuzzy match an open task; release the lock before toggling to avoid self-deadlock.
+    let found: Option<i64> = {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id FROM tasks WHERE completed = 0 AND (text LIKE ?1 OR ?2 LIKE '%' || text || '%')
+             ORDER BY created_at DESC LIMIT 1",
+            params![format!("%{}%", text), text],
+            |row| row.get(0),
+        )
+        .ok()
+    };
+
+    let id = match found {
+        Some(id) => id,
+        None => add_task(db, text)?.id,
+    };
+    toggle_task(db, id)
+}
+pub fn update_task_text(db: &Database, id: i64, text: &str) -> Result<()> {
     let conn = db.conn.lock().unwrap();
-    
-    // Try to find matching task (fuzzy match)
-    let search_pattern = format!("%{}%", text);
-    let mut stmt = conn.prepare(
-        "SELECT id, text, completed, created_at, completed_at 
-         FROM tasks 
-         WHERE text LIKE ?1 AND completed = 0 
-         LIMIT 1"
-    )?;
-    
-    if let Ok(task) = stmt.query_row(params![search_pattern], |row| {
-        Ok(Task {
-            id: row.get(0)?,
-            text: row.get(1)?,
-            completed: row.get::<_, i32>(2)? != 0,
-            created_at: row.get(3)?,
-            completed_at: row.get(4)?,
-        })
-    }) {
-        // Mark as completed
-        toggle_task(db, task.id)?;
-        get_task_by_id(db, task.id)
-    } else {
-        // Create new completed task
-        add_task(db, text)?;
-        let new_task = get_all_tasks(db)?.first().unwrap().clone();
-        toggle_task(db, new_task.id)?;
-        get_task_by_id(db, new_task.id)
-    }
+    conn.execute("UPDATE tasks SET text = ?1 WHERE id = ?2", params![text, id])?;
+    Ok(())
 }
 
-fn get_task_by_id(db: &Database, id: i64) -> Result<Task> {
+pub fn get_setting(db: &Database, key: &str) -> Option<String> {
     let conn = db.conn.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "SELECT id, text, completed, created_at, completed_at FROM tasks WHERE id = ?1"
-    )?;
-    stmt.query_row(params![id], |row| {
-        Ok(Task {
-            id: row.get(0)?,
-            text: row.get(1)?,
-            completed: row.get::<_, i32>(2)? != 0,
-            created_at: row.get(3)?,
-            completed_at: row.get(4)?,
-        })
-    })
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |row| row.get(0))
+        .ok()
 }
 
-pub fn get_ollama_enabled(db: &Database) -> Result<bool> {
-    let conn = db.conn.lock().unwrap();
-    let value: String = conn.query_row(
-        "SELECT value FROM settings WHERE key = 'ollama_enabled'",
-        [],
-        |row| row.get(0),
-    ).unwrap_or_else(|_| "false".to_string());
-    Ok(value == "true")
-}
-
-pub fn set_ollama_enabled(db: &Database, enabled: bool) -> Result<()> {
+pub fn set_setting(db: &Database, key: &str, value: &str) -> Result<()> {
     let conn = db.conn.lock().unwrap();
     conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('ollama_enabled', ?1)",
-        params![if enabled { "true" } else { "false" }],
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params![key, value],
     )?;
     Ok(())
 }

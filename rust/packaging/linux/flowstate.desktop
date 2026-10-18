@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=FlowState
+Comment=Voice-first micro-task manager
+Exec=flowstate
+Icon=flowstate
+Terminal=false
+Categories=Office;Utility;
+StartupWMClass=flowstate

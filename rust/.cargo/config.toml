@@ -1,0 +1,4 @@
+# candle's quantized kernels pick SIMD code paths at compile time; without these the
+# on-device language model runs ~10x slower. AVX2/FMA/F16C are on every x86-64 CPU since 2013.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=+avx,+avx2,+fma,+f16c"]
