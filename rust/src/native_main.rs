@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 //! Native UI version using egui - 0% CPU when idle
-//! Run with: cargo run --bin flowstate-native --features native-ui --no-default-features
+//! Run with: cargo run --bin flowstate
 
 mod database;
 mod ollama;
@@ -14,38 +14,14 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::thread;
 
+const MAX_RECORDING_SECS: usize = 300;
+
 // Result from background processing
 enum ProcessingResult {
     Transcript(String),
     Tasks(Vec<database::Task>),
     Error(String),
     Done,
-}
-
-// Download state shared between UI and download thread
-#[derive(Clone)]
-struct DownloadState {
-    is_downloading: Arc<Mutex<bool>>,
-    current_model: Arc<Mutex<Option<String>>>,
-    progress: Arc<Mutex<f32>>,        // 0.0 to 1.0
-    downloaded_mb: Arc<Mutex<f32>>,
-    total_mb: Arc<Mutex<f32>>,
-    error: Arc<Mutex<Option<String>>>,
-    completed: Arc<Mutex<bool>>,
-}
-
-impl Default for DownloadState {
-    fn default() -> Self {
-        Self {
-            is_downloading: Arc::new(Mutex::new(false)),
-            current_model: Arc::new(Mutex::new(None)),
-            progress: Arc::new(Mutex::new(0.0)),
-            downloaded_mb: Arc::new(Mutex::new(0.0)),
-            total_mb: Arc::new(Mutex::new(0.0)),
-            error: Arc::new(Mutex::new(None)),
-            completed: Arc::new(Mutex::new(false)),
-        }
-    }
 }
 
 // App state
@@ -73,8 +49,6 @@ struct FlowStateApp {
     show_settings: bool,
     always_on_top: bool,
     timer_duration_mins: u32,
-    selected_model: String,
-    available_models: Vec<(String, bool)>, // (name, installed)
     ollama_enabled: bool,
 
     // Audio devices
@@ -90,9 +64,6 @@ struct FlowStateApp {
 
     // Background processing channel
     processing_rx: Option<mpsc::Receiver<ProcessingResult>>,
-
-    // Model download state
-    download_state: DownloadState,
 
     // Manual task entry buffer
     new_task_text: String,
@@ -119,32 +90,11 @@ impl Default for FlowStateApp {
             })
             .unwrap_or_default();
 
-        // Check whisper models (use same path as whisper module)
-        let models_dir = dirs::data_dir()
-            .unwrap_or_default()
-            .join("flowstate")
-            .join("whisper_models");
-        let available_models: Vec<(String, bool)> = vec![
-            ("tiny", 75),
-            ("base", 142),
-            ("small", 466),
-            ("medium", 1500),
-        ]
-        .into_iter()
-        .map(|(name, _size)| {
-            let model_path = models_dir.join(format!("ggml-{}.bin", name));
-            (name.to_string(), model_path.exists())
-        })
-        .collect();
-
-        // Auto-select first available model (prefer smaller ones)
-        let selected_model = available_models
-            .iter()
-            .find(|(_, installed)| *installed)
-            .map(|(name, _)| name.clone())
-            .unwrap_or_else(|| "tiny".to_string());
-
-        eprintln!("🔧 Selected Whisper model: {} (available: {:?})", selected_model, available_models);
+        eprintln!(
+            "🔧 Remote Whisper endpoint: {}",
+            std::env::var("WHISPER_URL")
+                .unwrap_or_else(|_| "http://192.168.1.14:8080/inference".to_string())
+        );
 
         Self {
             db,
@@ -161,8 +111,6 @@ impl Default for FlowStateApp {
             show_settings: false,
             always_on_top: false,
             timer_duration_mins,
-            selected_model,
-            available_models,
             ollama_enabled,
             audio_devices,
             selected_device_idx: 0,
@@ -170,7 +118,6 @@ impl Default for FlowStateApp {
             error_time: None,
             status_message: None,
             processing_rx: None,
-            download_state: DownloadState::default(),
             new_task_text: String::new(),
         }
     }
@@ -362,132 +309,6 @@ impl FlowStateApp {
         self.tasks = database::get_all_tasks(&self.db).unwrap_or_default();
     }
 
-    fn refresh_models(&mut self) {
-        let models_dir = dirs::data_dir()
-            .unwrap_or_default()
-            .join("flowstate")
-            .join("whisper_models");
-        self.available_models = vec![
-            ("tiny", 75),
-            ("base", 142),
-            ("small", 466),
-            ("medium", 1500),
-        ]
-        .into_iter()
-        .map(|(name, _size)| {
-            let model_path = models_dir.join(format!("ggml-{}.bin", name));
-            (name.to_string(), model_path.exists())
-        })
-        .collect();
-    }
-
-    fn start_download(&mut self, model_name: &str) {
-        let state = self.download_state.clone();
-        let model = model_name.to_string();
-
-        // Set downloading state
-        *state.is_downloading.lock().unwrap() = true;
-        *state.current_model.lock().unwrap() = Some(model.clone());
-        *state.progress.lock().unwrap() = 0.0;
-        *state.downloaded_mb.lock().unwrap() = 0.0;
-        *state.error.lock().unwrap() = None;
-        *state.completed.lock().unwrap() = false;
-
-        // Get model URL and size
-        let (url, total_size) = match model.as_str() {
-            "tiny" => ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin", 75_000_000u64),
-            "base" => ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin", 142_000_000u64),
-            "small" => ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin", 466_000_000u64),
-            "medium" => ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin", 1_500_000_000u64),
-            _ => {
-                *state.error.lock().unwrap() = Some("Unknown model".to_string());
-                *state.is_downloading.lock().unwrap() = false;
-                return;
-            }
-        };
-
-        *state.total_mb.lock().unwrap() = total_size as f32 / 1_000_000.0;
-
-        let url = url.to_string();
-
-        // Download in background thread
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let models_dir = dirs::data_dir()
-                    .unwrap_or_default()
-                    .join("flowstate")
-                    .join("whisper_models");
-
-                if let Err(e) = std::fs::create_dir_all(&models_dir) {
-                    *state.error.lock().unwrap() = Some(format!("Failed to create directory: {}", e));
-                    *state.is_downloading.lock().unwrap() = false;
-                    return;
-                }
-
-                let model_path = models_dir.join(format!("ggml-{}.bin", model));
-
-                // Download with reqwest
-                let client = reqwest::Client::new();
-                let response = match client.get(&url).send().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        *state.error.lock().unwrap() = Some(format!("Download failed: {}", e));
-                        *state.is_downloading.lock().unwrap() = false;
-                        return;
-                    }
-                };
-
-                if !response.status().is_success() {
-                    *state.error.lock().unwrap() = Some(format!("HTTP error: {}", response.status()));
-                    *state.is_downloading.lock().unwrap() = false;
-                    return;
-                }
-
-                let total = response.content_length().unwrap_or(total_size);
-                *state.total_mb.lock().unwrap() = total as f32 / 1_000_000.0;
-
-                let mut file = match std::fs::File::create(&model_path) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        *state.error.lock().unwrap() = Some(format!("Failed to create file: {}", e));
-                        *state.is_downloading.lock().unwrap() = false;
-                        return;
-                    }
-                };
-
-                use futures_util::StreamExt;
-                use std::io::Write;
-
-                let mut stream = response.bytes_stream();
-                let mut downloaded: u64 = 0;
-
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(bytes) => {
-                            if let Err(e) = file.write_all(&bytes) {
-                                *state.error.lock().unwrap() = Some(format!("Write error: {}", e));
-                                *state.is_downloading.lock().unwrap() = false;
-                                return;
-                            }
-                            downloaded += bytes.len() as u64;
-                            *state.downloaded_mb.lock().unwrap() = downloaded as f32 / 1_000_000.0;
-                            *state.progress.lock().unwrap() = downloaded as f32 / total as f32;
-                        }
-                        Err(e) => {
-                            *state.error.lock().unwrap() = Some(format!("Download error: {}", e));
-                            *state.is_downloading.lock().unwrap() = false;
-                            return;
-                        }
-                    }
-                }
-
-                *state.completed.lock().unwrap() = true;
-                *state.is_downloading.lock().unwrap() = false;
-            });
-        });
-    }
-
     fn start_recording(&mut self) {
         let host = cpal::default_host();
 
@@ -526,6 +347,7 @@ impl FlowStateApp {
         let sample_rate = supported_config.sample_rate().0;
         let channels = supported_config.channels() as usize;
         let sample_format = supported_config.sample_format();
+        let max_recording_samples = MAX_RECORDING_SECS.saturating_mul(sample_rate as usize);
 
         // Store sample rate for resampling later
         self.input_sample_rate = sample_rate;
@@ -542,6 +364,7 @@ impl FlowStateApp {
             cpal::SampleFormat::I16 => {
                 let buffer = buffer.clone();
                 let audio_level = audio_level.clone();
+                let max_recording_samples = max_recording_samples;
                 device.build_input_stream(
                     &config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
@@ -565,7 +388,8 @@ impl FlowStateApp {
                         }
 
                         let mut buf = buffer.lock().unwrap();
-                        buf.extend(mono);
+                        let remaining = max_recording_samples.saturating_sub(buf.len());
+                        buf.extend(mono.into_iter().take(remaining));
                     },
                     |err| eprintln!("Audio error: {}", err),
                     None,
@@ -574,6 +398,7 @@ impl FlowStateApp {
             cpal::SampleFormat::F32 => {
                 let buffer = buffer.clone();
                 let audio_level = audio_level.clone();
+                let max_recording_samples = max_recording_samples;
                 device.build_input_stream(
                     &config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -594,7 +419,8 @@ impl FlowStateApp {
                         }
 
                         let mut buf = buffer.lock().unwrap();
-                        buf.extend(mono);
+                        let remaining = max_recording_samples.saturating_sub(buf.len());
+                        buf.extend(mono.into_iter().take(remaining));
                     },
                     |err| eprintln!("Audio error: {}", err),
                     None,
@@ -680,9 +506,8 @@ impl FlowStateApp {
         }
 
         self.is_processing = true;
-        self.status_message = Some("Loading model...".to_string());
+        self.status_message = Some("Sending audio to Whisper...".to_string());
 
-        let model = self.selected_model.clone();
         let ollama_enabled = self.ollama_enabled;
         let input_rate = self.input_sample_rate;
 
@@ -722,7 +547,7 @@ impl FlowStateApp {
             eprintln!("📊 Resampled to {} samples", resampled.len());
 
             // Transcribe
-            match whisper::transcribe_audio(&resampled, &model) {
+            match whisper::transcribe_audio(&resampled) {
                 Ok(transcript) => {
                     eprintln!("📝 Transcript: '{}'", transcript);
 
@@ -772,7 +597,7 @@ impl FlowStateApp {
 }
 
 impl eframe::App for FlowStateApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Check timer expiry
         if self.timer_remaining() == Duration::ZERO && self.timer_duration_mins > 0 {
             // Play 3-tone audible chime through default output device.
@@ -1112,60 +937,11 @@ impl eframe::App for FlowStateApp {
                         });
 
                     ui.add_space(8.0);
-
-                    // Whisper model
-                    ui.label("Whisper Model:");
-
-                    // Check if download completed and refresh
-                    if *self.download_state.completed.lock().unwrap() {
-                        self.refresh_models();
-                        *self.download_state.completed.lock().unwrap() = false;
-                    }
-
-                    let is_downloading = *self.download_state.is_downloading.lock().unwrap();
-                    let current_downloading = self.download_state.current_model.lock().unwrap().clone();
-
-                    // Clone available_models to avoid borrow issues
-                    let models_snapshot: Vec<_> = self.available_models.clone();
-                    let mut model_to_download: Option<String> = None;
-
-                    for (name, installed) in &models_snapshot {
-                        ui.horizontal(|ui| {
-                            let selected = self.selected_model == *name;
-                            if ui.radio(selected && *installed, name).clicked() && *installed {
-                                self.selected_model = name.clone();
-                            }
-
-                            let is_this_downloading = current_downloading.as_ref() == Some(name);
-
-                            if *installed {
-                                ui.colored_label(egui::Color32::from_rgb(74, 222, 128), "✓ Installed");
-                            } else if is_this_downloading {
-                                // Show progress
-                                let progress = *self.download_state.progress.lock().unwrap();
-                                let downloaded = *self.download_state.downloaded_mb.lock().unwrap();
-                                let total = *self.download_state.total_mb.lock().unwrap();
-                                ui.add(egui::ProgressBar::new(progress).text(format!("{:.0}/{:.0} MB", downloaded, total)));
-                            } else if !is_downloading {
-                                // Show download button
-                                if ui.small_button("Download").clicked() {
-                                    model_to_download = Some(name.clone());
-                                }
-                            } else {
-                                ui.colored_label(egui::Color32::GRAY, "—");
-                            }
-                        });
-                    }
-
-                    // Start download if requested (after the loop to avoid borrow issues)
-                    if let Some(model) = model_to_download {
-                        self.start_download(&model);
-                    }
-
-                    // Show download error if any
-                    if let Some(ref error) = *self.download_state.error.lock().unwrap() {
-                        ui.colored_label(egui::Color32::from_rgb(248, 113, 113), error);
-                    }
+                    ui.label("Whisper server:");
+                    ui.monospace(
+                        std::env::var("WHISPER_URL")
+                            .unwrap_or_else(|_| "http://192.168.1.14:8080/inference".to_string()),
+                    );
 
                     ui.add_space(8.0);
 
@@ -1187,10 +963,8 @@ impl eframe::App for FlowStateApp {
 
         // Only repaint when needed (not continuously!)
         // This is the key to 0% CPU - we only repaint on events
-        let is_downloading = *self.download_state.is_downloading.lock().unwrap();
-
-        if self.is_recording || is_downloading || self.is_processing {
-            // Repaint every 100ms while recording, downloading, or processing
+        if self.is_recording || self.is_processing {
+            // Repaint every 100ms while recording or processing
             ctx.request_repaint_after(Duration::from_millis(100));
         } else {
             // When idle, only repaint every 10 seconds for timer

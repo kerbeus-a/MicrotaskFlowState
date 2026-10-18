@@ -1,6 +1,6 @@
 # Create minimal ICNS file (macOS icon)
 # ICNS is a complex format, but we can create a minimal valid one
-$iconsDir = "src-tauri\icons"
+$iconsDir = "rust\icons"
 
 # Minimal ICNS file structure (just header, no actual image data for now)
 # This is a workaround - a proper ICNS would require more complex structure

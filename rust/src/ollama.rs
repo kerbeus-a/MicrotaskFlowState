@@ -38,7 +38,7 @@ pub struct ParsedTask {
 pub enum TaskAction {
     Add(String),           // Add a new task
     Complete(String),      // Mark a task as completed (by matching text)
-    Remove(String),        // Delete/remove a task (by matching text)
+    Remove,                // Ignore delete/remove commands in the current native flow
 }
 
 // Extract task name from "[task] done" or "[task] is done" patterns
@@ -152,7 +152,7 @@ pub fn parse_transcript_to_actions(transcript: &str) -> Vec<TaskAction> {
 
     // Determine action type (priority: remove > complete > add)
     if has_remove {
-        actions.push(TaskAction::Remove(task_text));
+        actions.push(TaskAction::Remove);
     } else if has_complete {
         actions.push(TaskAction::Complete(task_text));
     } else if has_add {
@@ -200,40 +200,6 @@ fn is_noise_transcript(text: &str) -> bool {
     }
 
     false
-}
-
-// Check if text looks like a task command (imperative mood)
-fn looks_like_task_command(text: &str) -> bool {
-    let imperative_starters = [
-        "buy", "get", "call", "email", "send", "write", "read", "check",
-        "fix", "update", "review", "clean", "organize", "schedule", "book",
-        "prepare", "finish", "complete", "make", "do", "create", "build",
-        "test", "deploy", "push", "merge", "commit", "refactor", "pay",
-        "pick", "drop", "meet", "visit", "contact", "reply", "respond",
-        "submit", "upload", "download", "install", "setup", "configure",
-        "order", "cancel", "return", "print", "scan", "copy", "move",
-        "rename", "backup", "sync", "share", "post", "publish", "edit",
-        "draft", "sign", "fill", "apply", "register", "renew", "confirm"
-    ];
-
-    // Also match phrases that indicate tasks
-    let task_phrases = [
-        "i need", "i have", "i should", "i must", "i want", "i gotta",
-        "don't forget", "remember to", "make sure", "go to", "look at",
-        "work on", "start", "begin", "continue", "follow up"
-    ];
-
-    let words: Vec<&str> = text.split_whitespace().collect();
-
-    // Check first word for imperative verbs
-    if let Some(first_word) = words.first() {
-        if imperative_starters.iter().any(|&starter| first_word.starts_with(starter)) {
-            return true;
-        }
-    }
-
-    // Check for task-indicating phrases anywhere in text
-    task_phrases.iter().any(|phrase| text.contains(phrase))
 }
 
 // Extract the actual task description from the transcript
@@ -305,100 +271,9 @@ fn parse_transcript_simple(transcript: &str) -> Vec<Task> {
                 created_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
                 completed_at: Some(chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
             }),
-            TaskAction::Remove(_) => None, // Handled separately
+            TaskAction::Remove => None,
         }
     }).collect()
-}
-
-// Get removal actions from transcript (simple parser - for local fallback)
-pub fn get_removal_actions(transcript: &str) -> Vec<String> {
-    parse_transcript_to_actions(transcript)
-        .into_iter()
-        .filter_map(|action| {
-            if let TaskAction::Remove(text) = action {
-                Some(text)
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-// Get removal actions using Ollama
-pub async fn get_removal_actions_ollama(transcript: &str) -> Vec<String> {
-    match try_ollama_removal_parse(transcript).await {
-        Ok(removals) => removals,
-        Err(_) => get_removal_actions(transcript), // Fall back to simple parser
-    }
-}
-
-async fn try_ollama_removal_parse(transcript: &str) -> Result<Vec<String>, String> {
-    let ollama_url = std::env::var("OLLAMA_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".to_string());
-
-    let model = std::env::var("OLLAMA_MODEL")
-        .unwrap_or_else(|_| "llama3.2".to_string());
-
-    let client = reqwest::Client::new();
-
-    // Check if Ollama is running first
-    let check = client.get(&format!("{}/api/tags", ollama_url))
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await;
-
-    if check.is_err() {
-        return Err("Ollama not available".to_string());
-    }
-
-    let prompt = format!(
-        r#"Extract ONLY task removal/deletion requests from this transcript.
-Return a JSON array of task descriptions to remove.
-If no removal requests, return empty array [].
-
-Examples:
-- "delete the milk task" → ["milk"]
-- "remove buy groceries" → ["buy groceries"]
-- "cancel meeting" → ["meeting"]
-- "add buy bread" → [] (this is adding, not removing)
-
-Transcript: "{}"
-
-Return ONLY valid JSON array of strings:"#,
-        transcript
-    );
-
-    let request = OllamaRequest {
-        model,
-        prompt,
-        stream: false,
-    };
-
-    let response = client
-        .post(&format!("{}/api/generate", ollama_url))
-        .json(&request)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let ollama_response: OllamaResponse = response
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let response_text = ollama_response.response.trim();
-    let json_str = if response_text.contains("```") {
-        response_text
-            .split("```")
-            .find(|s| s.trim().starts_with('[') || s.trim().starts_with("json"))
-            .map(|s| s.trim().trim_start_matches("json").trim())
-            .unwrap_or(response_text)
-    } else {
-        response_text
-    };
-
-    serde_json::from_str(json_str).map_err(|e| e.to_string())
 }
 
 pub async fn parse_transcript(transcript: &str, ollama_enabled: bool) -> Result<Vec<Task>, String> {
@@ -576,7 +451,7 @@ JSON:"#,
                     created_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
                     completed_at: Some(chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
                 }),
-                "remove" => None, // Remove actions handled separately via get_removal_actions
+                "remove" => None,
                 _ => None,
             }
         }).collect());

@@ -54,7 +54,7 @@ if (Get-Command rustc -ErrorAction SilentlyContinue) {
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
     Write-Host "  1. Close and reopen your terminal" -ForegroundColor White
-    Write-Host "  2. Run: npm run tauri dev" -ForegroundColor White
+    Write-Host "  2. Run: cd rust; cargo run --bin flowstate" -ForegroundColor White
 } else {
     Write-Host ""
     Write-Host "Rust installation may not be complete." -ForegroundColor Yellow

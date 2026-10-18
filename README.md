@@ -1,131 +1,96 @@
 # FlowState
 
-A lightweight Windows desktop application for high-intensity knowledge workers. FlowState uses voice-to-text and local LLMs to manage micro-tasks, allowing users to "dump" their current status and future intentions via voice.
+A lightweight native Windows desktop application for high-intensity knowledge workers. FlowState uses voice-to-text and local LLMs to manage micro-tasks, allowing users to dump current status and future intentions via voice.
 
 ## Features
 
-- 🎤 **Voice Logging**: Record voice notes that are automatically transcribed and parsed
-- 🤖 **AI Task Parsing**: Local LLM (Ollama) analyzes transcripts to extract completed and new tasks
-- ✅ **Task Management**: Simple, minimalist task list with manual editing capabilities
-- ⏰ **Awareness Timer**: 15-minute rhythmic timer to break hyperfocus and check current tasks
-- 🔒 **100% Local**: All processing happens on your machine - no data leaves your computer
-- ⌨️ **Global Hotkey**: Win + Alt + R to quickly start recording
+- Voice logging with local Whisper transcription
+- Local task parsing with the built-in parser or Ollama
+- Simple task management with manual entry/editing
+- Awareness timer for periodic check-ins
+- Local SQLite storage
+- Verified Whisper model downloads with pinned SHA-256 hashes
 
 ## Tech Stack
 
-- **Frontend**: React + TypeScript + Vite
-- **Backend**: Rust + Tauri
+- **UI**: Rust + egui/eframe
 - **Database**: SQLite
-- **Speech-to-Text**: Whisper.cpp (to be integrated)
-- **Local LLM**: Ollama (default) or LM Studio
+- **Speech-to-Text**: whisper.cpp via `whisper-rs`
+- **Local LLM**: Ollama
 
 ## Prerequisites
 
-Before running this project, you need:
-
-1. **Node.js** (v18 or higher) and npm
-2. **Rust** (latest stable version) - [Install Rust](https://www.rust-lang.org/tools/install)
-3. **Ollama** - [Install Ollama](https://ollama.ai/) and pull a model:
+1. **Rust** latest stable: <https://www.rust-lang.org/tools/install>
+2. **Windows build tools** with the Windows SDK.
+3. **Ollama** if you want LLM-assisted parsing:
    ```bash
-   ollama pull llama3
-   # or
-   ollama pull mistral
+   ollama pull llama3.2
    ```
-4. **Whisper Models** - Models are automatically downloaded through the app's Settings UI (no manual installation needed!)
-
-## Installation
-
-1. Clone the repository:
-   ```bash
-   git clone <repository-url>
-   cd MicroTask
-   ```
-
-2. Install frontend dependencies:
-   ```bash
-   npm install
-   ```
-
-3. The Rust dependencies will be automatically installed when you first build the project.
 
 ## Development
 
-Run the development server:
+From the Rust project directory:
 
 ```bash
-npm run tauri dev
+cd rust
+cargo run --bin flowstate
 ```
-
-This will:
-- Start the Vite dev server for the React frontend
-- Build and run the Tauri application
-- Enable hot-reload for both frontend and backend changes
 
 ## Building
 
-To build the application:
+For a Windows release build:
 
 ```bash
-npm run tauri build
+cd rust
+cargo build --release --bin flowstate
 ```
 
-The built application will be in `src-tauri/target/release/`.
+The executable is written to `rust/target/release/flowstate.exe`.
 
 ## Configuration
 
 ### Model Management
 
-FlowState includes built-in model management:
+Whisper models are downloaded from Hugging Face through the settings UI. Downloads are written to a temporary file, checked against expected byte size and SHA-256 hash, then atomically installed.
 
-1. **Whisper Models**: Click the ⚙️ settings button to open the Settings modal
-   - Models are automatically downloaded from Hugging Face
-   - Start with "Tiny" (75 MB) for fastest performance
-   - Larger models (Base, Small, Medium, Large) provide better accuracy
-   - Models are stored in your app data directory
-   - Download progress is shown in real-time
+Available models:
 
-2. **Ollama Settings**:
-   - By default, FlowState connects to Ollama at `http://localhost:11434` using the `llama3` model
-   - You can override these by setting environment variables:
-     - `OLLAMA_URL`: Custom Ollama server URL (default: `http://localhost:11434`)
-     - `OLLAMA_MODEL`: Model name to use (default: `llama3`)
-   - Ollama status is shown in the Settings modal
+- Tiny
+- Base
+- Small
+- Medium
 
-### Window Settings
+### Ollama
 
-The window is configured to be 300px wide by default. You can modify this in `src-tauri/tauri.conf.json`.
+By default, FlowState connects to `http://localhost:11434` using `llama3.2`.
+
+Environment overrides:
+
+- `OLLAMA_URL`: custom Ollama server URL
+- `OLLAMA_MODEL`: model name to use
 
 ## Project Structure
 
 ```
 .
-├── src/                    # React frontend
-│   ├── components/         # React components
-│   ├── App.tsx            # Main app component
-│   └── main.tsx           # Entry point
-├── src-tauri/             # Rust backend
+├── rust/                  # Rust native application
 │   ├── src/
-│   │   ├── main.rs        # Tauri entry point
-│   │   ├── commands.rs    # Tauri command handlers
 │   │   ├── database.rs    # SQLite database operations
-│   │   ├── timer.rs       # Awareness timer logic
-│   │   ├── whisper.rs    # Whisper.cpp integration (placeholder)
+│   │   ├── native_main.rs # egui application entry point
+│   │   ├── whisper.rs    # Whisper model management and transcription
 │   │   └── ollama.rs      # Ollama API integration
-│   ├── Cargo.toml         # Rust dependencies
-│   └── tauri.conf.json    # Tauri configuration
-└── package.json           # Node.js dependencies
+│   ├── icons/
+│   ├── Cargo.toml
+│   └── build.rs
 ```
 
 ## Usage
 
-1. **Start the application**: Run `npm run tauri dev` or launch the built executable
-2. **Record a voice log**: Click the record button or press `Win + Alt + R`
-3. **View tasks**: Your tasks will appear in the list, automatically parsed from your voice logs
-4. **Manage tasks**: 
-   - Click checkbox to mark complete
-   - Double-click to edit task text
-   - Click × to delete
-5. **Timer**: The 15-minute awareness timer runs automatically and will alert you when it expires
+1. Start the application with `cargo run --bin flowstate` or launch the built executable.
+2. Download a Whisper model from settings.
+3. Record a voice log.
+4. Review and edit parsed tasks.
+5. Use the awareness timer for periodic check-ins.
 
 ## Roadmap
 
@@ -151,8 +116,5 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Notes
 
-- **Whisper Models**: Models are automatically downloaded when you use the Settings UI. No manual installation required!
-- **Ollama**: Make sure Ollama is running before using voice logging features. The app will show a warning if Ollama is not connected.
-- **Model Storage**: Whisper models are stored in your app data directory (typically `%APPDATA%\com.flowstate.app\whisper_models` on Windows).
-- **Whisper.cpp Binary**: The app will look for a `whisper` binary in your PATH. For full speech-to-text functionality, you'll need to install whisper.cpp separately or integrate it as a library.
-- **Awareness Timer**: Currently uses a simple polling mechanism. For production, consider using Windows session unlock events (WTSSESSION_UNLOCK).
+- Whisper models are stored in the FlowState app data directory.
+- Ollama is optional; the built-in parser is used when Ollama is disabled or unavailable.
