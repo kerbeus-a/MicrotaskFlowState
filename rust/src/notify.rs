@@ -1,8 +1,19 @@
-//! Gentle "look at me" for the check-in timer: flash the taskbar button a few times, then stop.
-//! (eframe's RequestUserAttention flashes until the window is activated.)
+//! Gentle "look at me" for the check-in timer: a short taskbar nudge that stops on its own.
+//! (eframe's RequestUserAttention alone keeps going until the window is activated.)
+
+use eframe::egui;
+
+const INTERVAL_MS: u32 = 500;
+
+/// Flash the taskbar entry `times` times (Windows) or raise a brief urgency hint (Linux),
+/// then clear it.
+pub fn flash_taskbar(ctx: &egui::Context, times: u32) {
+    imp::flash_taskbar(ctx, times);
+}
 
 #[cfg(windows)]
 mod imp {
+    use super::{egui, INTERVAL_MS};
     use std::sync::OnceLock;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         FlashWindowEx, FLASHWINFO, FLASHW_STOP, FLASHW_TRAY,
@@ -29,8 +40,7 @@ mod imp {
         }
     }
 
-    pub fn flash_taskbar(times: u32) {
-        const INTERVAL_MS: u32 = 500;
+    pub fn flash_taskbar(_ctx: &egui::Context, times: u32) {
         flash(FLASHW_TRAY, times, INTERVAL_MS);
         // Windows leaves the button highlighted after the last flash; clear it once done.
         std::thread::spawn(move || {
@@ -44,7 +54,26 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    pub fn flash_taskbar(_times: u32) {}
+    use super::{egui, INTERVAL_MS};
+
+    /// Linux has no "flash N times" API. Set the urgency hint (taskbar highlight on KDE/XFCE,
+    /// "ready" notice on GNOME) for about as long as the Windows flashes, then clear it.
+    pub fn flash_taskbar(ctx: &egui::Context, times: u32) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                (INTERVAL_MS * 2 * times + 200) as u64,
+            ));
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Reset,
+            ));
+            ctx.request_repaint();
+        });
+    }
 }
 
-pub use imp::*;
+#[cfg(windows)]
+pub use imp::set_window;

@@ -456,7 +456,7 @@ impl FlowStateApp {
                 audio::play_chime();
             }
             if !ctx.input(|i| i.focused) {
-                crate::notify::flash_taskbar(3);
+                crate::notify::flash_taskbar(ctx, 3);
             }
             self.toast(ToastKind::Info, "Check-in: what are you working on now?");
             self.reset_timer();
