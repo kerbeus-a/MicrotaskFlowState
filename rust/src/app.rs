@@ -442,7 +442,7 @@ impl FlowStateApp {
         }
     }
 
-    fn tick_timer(&mut self, ctx: &egui::Context) {
+    fn tick_timer(&mut self) {
         if self.timer_mins == 0 || self.timer_paused.is_some() {
             return;
         }
@@ -450,9 +450,6 @@ impl FlowStateApp {
             if self.chime {
                 audio::play_chime();
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                egui::UserAttentionType::Informational,
-            ));
             self.toast(ToastKind::Info, "Check-in: what are you working on now?");
             self.reset_timer();
         }
@@ -1431,7 +1428,7 @@ impl eframe::App for FlowStateApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background();
-        self.tick_timer(ctx);
+        self.tick_timer();
 
         if self.applied_on_top != Some(self.always_on_top) {
             let level = if self.always_on_top {
