@@ -9,6 +9,7 @@ mod database;
 mod icon;
 mod llm;
 mod models;
+mod notify;
 mod parser;
 mod qwen2;
 mod theme;
@@ -165,6 +166,7 @@ fn set_taskbar_icon(cc: &eframe::CreationContext<'_>) {
 
     let Ok(handle) = cc.window_handle() else { return };
     let RawWindowHandle::Win32(win) = handle.as_raw() else { return };
+    notify::set_window(win.hwnd.get());
     let hwnd = win.hwnd.get() as windows_sys::Win32::Foundation::HWND;
 
     // SAFETY: plain Win32 calls on our own window; resource id 1 is the icon from build.rs.

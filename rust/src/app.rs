@@ -206,6 +206,11 @@ impl FlowStateApp {
     }
 
     fn timer_total(&self) -> Duration {
+        // Debug builds: FLOWSTATE_CHECKIN_SECS shortens the timer for testing.
+        #[cfg(debug_assertions)]
+        if let Some(secs) = std::env::var("FLOWSTATE_CHECKIN_SECS").ok().and_then(|s| s.parse().ok()) {
+            return Duration::from_secs(secs);
+        }
         Duration::from_secs(self.timer_mins as u64 * 60)
     }
 
@@ -442,13 +447,16 @@ impl FlowStateApp {
         }
     }
 
-    fn tick_timer(&mut self) {
+    fn tick_timer(&mut self, ctx: &egui::Context) {
         if self.timer_mins == 0 || self.timer_paused.is_some() {
             return;
         }
         if self.timer_remaining().is_zero() {
             if self.chime {
                 audio::play_chime();
+            }
+            if !ctx.input(|i| i.focused) {
+                crate::notify::flash_taskbar(3);
             }
             self.toast(ToastKind::Info, "Check-in: what are you working on now?");
             self.reset_timer();
@@ -1428,7 +1436,7 @@ impl eframe::App for FlowStateApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background();
-        self.tick_timer();
+        self.tick_timer(ctx);
 
         if self.applied_on_top != Some(self.always_on_top) {
             let level = if self.always_on_top {
