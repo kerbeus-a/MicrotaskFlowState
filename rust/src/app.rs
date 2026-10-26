@@ -591,6 +591,21 @@ fn paint_trash(p: &egui::Painter, r: Rect, c: Color32) {
     p.rect_stroke(body, 2.0, s);
 }
 
+fn paint_flag(p: &egui::Painter, r: Rect, c: Color32, filled: bool) {
+    let pole_x = r.left() + r.width() * 0.2;
+    p.line_segment([egui::pos2(pole_x, r.top()), egui::pos2(pole_x, r.bottom())], Stroke::new(1.6, c));
+    let flag = vec![
+        egui::pos2(pole_x, r.top()),
+        egui::pos2(r.right(), r.top() + r.height() * 0.27),
+        egui::pos2(pole_x, r.top() + r.height() * 0.55),
+    ];
+    if filled {
+        p.add(egui::Shape::convex_polygon(flag, c, Stroke::NONE));
+    } else {
+        p.add(egui::Shape::closed_line(flag, Stroke::new(1.4, c)));
+    }
+}
+
 fn paint_pause(p: &egui::Painter, r: Rect, c: Color32) {
     let w = r.width() * 0.28;
     p.rect_filled(Rect::from_min_size(r.left_top() + egui::vec2(r.width() * 0.1, 0.0), egui::vec2(w, r.height())), 1.5, c);
@@ -1009,6 +1024,7 @@ impl FlowStateApp {
 
         let mut toggle = None;
         let mut delete = None;
+        let mut flag = None;
         let mut start_edit = None;
         let mut commit = false;
         let mut cancel = false;
@@ -1066,6 +1082,22 @@ impl FlowStateApp {
                                         delete = Some(task.id);
                                     }
 
+                                    // Priority flag: always shown (red) when set, otherwise on hover.
+                                    if !task.completed {
+                                        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+                                        if task.priority || row_hovered || resp.hovered() {
+                                            if resp.hovered() {
+                                                ui.painter().rect_filled(rect, 6.0, with_alpha(DANGER, 0.15));
+                                            }
+                                            let c = if task.priority || resp.hovered() { DANGER } else { MUTED };
+                                            paint_flag(ui.painter(), rect.shrink(5.5), c, task.priority);
+                                        }
+                                        let tip = if task.priority { "Remove high priority" } else { "Mark as high priority" };
+                                        if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tip).clicked() {
+                                            flag = Some((task.id, !task.priority));
+                                        }
+                                    }
+
                                     // Age, inline on the right
                                     let when = match (&task.completed_at, task.completed) {
                                         (Some(at), true) => relative_time(at),
@@ -1104,6 +1136,8 @@ impl FlowStateApp {
                                         } else {
                                             let text = if task.completed {
                                                 RichText::new(&task.text).strikethrough().color(MUTED)
+                                            } else if task.priority {
+                                                RichText::new(&task.text).color(lerp_color(TEXT, DANGER, 0.25)).strong()
                                             } else {
                                                 RichText::new(&task.text).color(TEXT)
                                             };
@@ -1122,8 +1156,12 @@ impl FlowStateApp {
                         .response;
 
                     ui.ctx().data_mut(|d| d.insert_temp(row_id, row.rect));
+                    let urgent = task.priority && !task.completed;
                     let (fill, stroke) = if editing_this {
                         (SURFACE_HI, with_alpha(ACCENT, 0.7))
+                    } else if urgent {
+                        let tint = if row_hovered { 0.16 } else { 0.10 };
+                        (lerp_color(SURFACE, DANGER, tint), with_alpha(DANGER, 0.55))
                     } else if row_hovered {
                         (SURFACE_HI, BORDER)
                     } else {
@@ -1133,6 +1171,14 @@ impl FlowStateApp {
                         bg,
                         egui::epaint::RectShape::new(row.rect, 10.0, fill, Stroke::new(1.0, stroke)),
                     );
+                    if urgent {
+                        // Red accent bar on the left edge.
+                        let bar = Rect::from_min_size(
+                            row.rect.left_top() + egui::vec2(1.0, 6.0),
+                            egui::vec2(3.0, row.rect.height() - 12.0),
+                        );
+                        ui.painter().rect_filled(bar, 1.5, DANGER);
+                    }
                 }
 
                 if show_done {
@@ -1164,6 +1210,12 @@ impl FlowStateApp {
         }
         if let Some(id) = toggle {
             let _ = database::toggle_task(&self.db, id);
+            self.reload_tasks();
+        }
+        if let Some((id, priority)) = flag {
+            if let Err(e) = database::set_priority(&self.db, id, priority) {
+                self.toast(ToastKind::Error, format!("Couldn't update priority: {e}"));
+            }
             self.reload_tasks();
         }
         if let Some(id) = delete {

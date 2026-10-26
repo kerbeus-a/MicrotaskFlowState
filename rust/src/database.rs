@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, Result, Row, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -13,13 +13,27 @@ pub struct Task {
     pub completed: bool,
     pub created_at: String,
     pub completed_at: Option<String>,
+    #[serde(default)]
+    pub priority: bool,
+}
+
+const TASK_COLUMNS: &str = "id, text, completed, created_at, completed_at, priority";
+
+fn row_to_task(row: &Row) -> Result<Task> {
+    Ok(Task {
+        id: row.get(0)?,
+        text: row.get(1)?,
+        completed: row.get::<_, i32>(2)? != 0,
+        created_at: row.get(3)?,
+        completed_at: row.get(4)?,
+        priority: row.get::<_, i32>(5)? != 0,
+    })
 }
 
 impl Database {
     /// Create the native app database.
     pub fn new() -> Result<Self> {
         let app_data_dir = crate::models::data_dir();
-
 
         std::fs::create_dir_all(&app_data_dir)
             .expect("Failed to create app data directory");
@@ -43,10 +57,19 @@ fn init_tables(conn: &Connection) -> Result<()> {
             text TEXT NOT NULL,
             completed INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            completed_at TEXT
+            completed_at TEXT,
+            priority INTEGER NOT NULL DEFAULT 0
         )",
         [],
     )?;
+
+    // Databases created before priorities existed: add the column.
+    let has_priority = conn
+        .prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'priority'")?
+        .exists([])?;
+    if !has_priority {
+        conn.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0", [])?;
+    }
 
     // Create index for faster queries
     conn.execute(
@@ -72,30 +95,25 @@ fn init_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn get_task(conn: &Connection, id: i64) -> Result<Task> {
+    conn.query_row(
+        &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+        params![id],
+        row_to_task,
+    )
+}
+
+/// Open tasks (high priority first, then newest) followed by tasks completed in the last 7 days.
 pub fn get_all_tasks(db: &Database) -> Result<Vec<Task>> {
     let conn = db.conn.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "SELECT id, text, completed, created_at, completed_at 
-         FROM tasks 
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TASK_COLUMNS}
+         FROM tasks
          WHERE completed = 0 OR completed_at > datetime('now', '-7 days')
-         ORDER BY completed ASC, created_at DESC"
-    )?;
-    
-    let task_iter = stmt.query_map([], |row| {
-        Ok(Task {
-            id: row.get(0)?,
-            text: row.get(1)?,
-            completed: row.get::<_, i32>(2)? != 0,
-            created_at: row.get(3)?,
-            completed_at: row.get(4)?,
-        })
-    })?;
-    
-    let mut tasks = Vec::new();
-    for task in task_iter {
-        tasks.push(task?);
-    }
-    Ok(tasks)
+         ORDER BY completed ASC, priority DESC, created_at DESC"
+    ))?;
+    let tasks = stmt.query_map([], row_to_task)?.collect();
+    tasks
 }
 
 pub fn add_task(db: &Database, text: &str) -> Result<Task> {
@@ -104,20 +122,7 @@ pub fn add_task(db: &Database, text: &str) -> Result<Task> {
         "INSERT INTO tasks (text, completed) VALUES (?1, 0)",
         params![text],
     )?;
-    
-    let id = conn.last_insert_rowid();
-    let mut stmt = conn.prepare(
-        "SELECT id, text, completed, created_at, completed_at FROM tasks WHERE id = ?1"
-    )?;
-    stmt.query_row(params![id], |row| {
-        Ok(Task {
-            id: row.get(0)?,
-            text: row.get(1)?,
-            completed: row.get::<_, i32>(2)? != 0,
-            created_at: row.get(3)?,
-            completed_at: row.get(4)?,
-        })
-    })
+    get_task(&conn, conn.last_insert_rowid())
 }
 
 pub fn delete_task(db: &Database, id: i64) -> Result<()> {
@@ -128,37 +133,29 @@ pub fn delete_task(db: &Database, id: i64) -> Result<()> {
 
 pub fn toggle_task(db: &Database, id: i64) -> Result<Task> {
     let conn = db.conn.lock().unwrap();
-    
-    // Get current state
-    let mut stmt = conn.prepare("SELECT completed FROM tasks WHERE id = ?1")?;
-    let current: i32 = stmt.query_row(params![id], |row| row.get(0))?;
+
+    let current: i32 = conn.query_row("SELECT completed FROM tasks WHERE id = ?1", params![id], |row| row.get(0))?;
     let new_state = if current == 0 { 1 } else { 0 };
-    
-    // Update
     let completed_at: Option<String> = if new_state == 1 {
         Some(chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string())
     } else {
         None
     };
-    
+
     conn.execute(
         "UPDATE tasks SET completed = ?1, completed_at = ?2 WHERE id = ?3",
         params![new_state, completed_at, id],
     )?;
-    
-    // Return updated task
-    let mut stmt = conn.prepare(
-        "SELECT id, text, completed, created_at, completed_at FROM tasks WHERE id = ?1"
+    get_task(&conn, id)
+}
+
+pub fn set_priority(db: &Database, id: i64, priority: bool) -> Result<()> {
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "UPDATE tasks SET priority = ?1 WHERE id = ?2",
+        params![priority as i32, id],
     )?;
-    stmt.query_row(params![id], |row| {
-        Ok(Task {
-            id: row.get(0)?,
-            text: row.get(1)?,
-            completed: row.get::<_, i32>(2)? != 0,
-            created_at: row.get(3)?,
-            completed_at: row.get(4)?,
-        })
-    })
+    Ok(())
 }
 
 pub fn find_and_complete_task(db: &Database, text: &str) -> Result<Task> {
@@ -180,6 +177,7 @@ pub fn find_and_complete_task(db: &Database, text: &str) -> Result<Task> {
     };
     toggle_task(db, id)
 }
+
 pub fn update_task_text(db: &Database, id: i64, text: &str) -> Result<()> {
     let conn = db.conn.lock().unwrap();
     conn.execute("UPDATE tasks SET text = ?1 WHERE id = ?2", params![text, id])?;

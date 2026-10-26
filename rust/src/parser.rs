@@ -259,6 +259,7 @@ fn new_task(text: String, completed: bool) -> Task {
         completed,
         created_at: now.clone(),
         completed_at: completed.then_some(now),
+        priority: false,
     }
 }
 
