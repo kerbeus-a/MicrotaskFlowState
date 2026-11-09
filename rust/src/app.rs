@@ -4,10 +4,11 @@ use crate::audio::{self, Captured, Recording};
 use crate::database::{self, Database, Task};
 use crate::models::{self, ModelKind, ModelSpec, SharedProgress};
 use crate::parser::{self, ParseEngine, ParseOptions, ParseOutcome};
+use crate::sync;
 use crate::theme::{self, *};
 use crate::whisper;
 use eframe::egui::{self, Align, Align2, Color32, CursorIcon, Layout, Rect, RichText, Sense, Stroke, Vec2};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const MAX_TASK_LEN: usize = 500;
@@ -63,7 +64,7 @@ struct Press {
 }
 
 pub struct FlowStateApp {
-    db: Database,
+    db: Arc<Database>,
     tasks: Vec<Task>,
     view: View,
     tab: Tab,
@@ -94,6 +95,16 @@ pub struct FlowStateApp {
     ollama_model: String,
     downloads: Vec<SharedProgress>,
 
+    // Nextcloud / CalDAV sync
+    sync_enabled: bool,
+    /// What the form shows; applied with "Connect".
+    sync_form: sync::Config,
+    /// What the running sync uses.
+    sync_active: sync::Config,
+    sync: Option<sync::Handle>,
+    sync_seen_generation: u64,
+    sync_seen_error: Option<String>,
+
     // Editing
     new_task_text: String,
     focus_composer: bool,
@@ -107,7 +118,7 @@ impl FlowStateApp {
     pub fn new(ctx: &egui::Context) -> Self {
         theme::apply(ctx);
 
-        let db = Database::new().expect("Failed to open database");
+        let db = Arc::new(Database::new().expect("Failed to open database"));
         let tasks = database::get_all_tasks(&db).unwrap_or_default();
         let get = |k: &str| database::get_setting(&db, k);
 
@@ -125,7 +136,14 @@ impl FlowStateApp {
             None => ParseEngine::Rules,
         };
 
-        let app = Self {
+        let sync_config = sync::Config {
+            server: get("sync_server").unwrap_or_default(),
+            username: get("sync_user").unwrap_or_default(),
+            password: get("sync_password").unwrap_or_default(),
+            list_name: get("sync_list").unwrap_or_else(|| "FlowState".into()),
+        };
+
+        let mut app = Self {
             tasks,
             view: View::Tasks,
             tab: Tab::Active,
@@ -154,6 +172,12 @@ impl FlowStateApp {
                 .or_else(|| std::env::var("OLLAMA_MODEL").ok())
                 .unwrap_or_else(|| "llama3.2".into()),
             downloads: Vec::new(),
+            sync_enabled: get("sync_enabled").as_deref() == Some("true"),
+            sync_form: sync_config.clone(),
+            sync_active: sync_config,
+            sync: None,
+            sync_seen_generation: 0,
+            sync_seen_error: None,
             new_task_text: String::new(),
             focus_composer: false,
             editing: None,
@@ -162,7 +186,46 @@ impl FlowStateApp {
             db,
         };
         app.warm_up_language_model();
+        app.restart_sync(ctx);
         app
+    }
+
+    /// (Re)start background sync with the active settings, or stop it when turned off.
+    fn restart_sync(&mut self, ctx: &egui::Context) {
+        self.sync = None;
+        self.sync_seen_error = None;
+        if self.sync_enabled && self.sync_active.is_complete() {
+            let ctx = ctx.clone();
+            self.sync = Some(sync::spawn(self.db.clone(), self.sync_active.clone(), move || {
+                ctx.request_repaint()
+            }));
+        }
+    }
+
+    fn nudge_sync(&self) {
+        if let Some(s) = &self.sync {
+            s.nudge();
+        }
+    }
+
+    fn poll_sync(&mut self) {
+        let Some(status) = self.sync.as_ref().map(|s| s.status()) else { return };
+        if status.generation != self.sync_seen_generation {
+            self.sync_seen_generation = status.generation;
+            // Changes from the server: reload without nudging another sync.
+            self.tasks = database::get_all_tasks(&self.db).unwrap_or_default();
+            let edited_gone =
+                matches!(&self.editing, Some((id, _)) if !self.tasks.iter().any(|t| t.id == *id));
+            if edited_gone {
+                self.editing = None;
+            }
+        }
+        if !status.running && status.error != self.sync_seen_error {
+            if let Some(e) = &status.error {
+                self.toast(ToastKind::Error, format!("Sync: {e}"));
+            }
+            self.sync_seen_error = status.error;
+        }
     }
 
     /// Load the on-device language model in the background so the first memo is quick.
@@ -186,8 +249,10 @@ impl FlowStateApp {
         }
     }
 
+    /// Reload after a local change, and let sync upload it.
     fn reload_tasks(&mut self) {
         self.tasks = database::get_all_tasks(&self.db).unwrap_or_default();
+        self.nudge_sync();
     }
 
     fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
@@ -1299,6 +1364,85 @@ impl FlowStateApp {
         }
     }
 
+    fn sync_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        section_title(
+            ui,
+            "Sync with Nextcloud",
+            "Shares tasks with iPhone Reminders and your other computers.",
+        );
+        let field = |ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, password: bool| {
+            ui.label(RichText::new(label).small().color(MUTED));
+            ui.add(
+                egui::TextEdit::singleline(value)
+                    .hint_text(hint)
+                    .password(password)
+                    .desired_width(f32::INFINITY),
+            );
+        };
+        field(ui, "Server address", &mut self.sync_form.server, "https://cloud.example.com", false);
+        field(ui, "Username", &mut self.sync_form.username, "", false);
+        field(ui, "App password", &mut self.sync_form.password, "Nextcloud → Settings → Security", true);
+        field(ui, "List name", &mut self.sync_form.list_name, "FlowState", false);
+        ui.add_space(2.0);
+
+        let form_changed = self.sync_form != self.sync_active;
+        let running = self.sync.as_ref().map(|s| s.status());
+        ui.horizontal(|ui| {
+            if !self.sync_enabled || form_changed {
+                let label = if self.sync_enabled { "Save & reconnect" } else { "Connect" };
+                let ready = self.sync_form.is_complete();
+                if ui.add_enabled_ui(ready, |ui| accent_button(ui, label)).inner.clicked() {
+                    self.sync_form.server = self.sync_form.server.trim().to_string();
+                    self.sync_form.username = self.sync_form.username.trim().to_string();
+                    self.sync_form.list_name = self.sync_form.list_name.trim().to_string();
+                    for (key, value) in [
+                        ("sync_server", self.sync_form.server.clone()),
+                        ("sync_user", self.sync_form.username.clone()),
+                        ("sync_password", self.sync_form.password.clone()),
+                        ("sync_list", self.sync_form.list_name.clone()),
+                        ("sync_enabled", "true".to_string()),
+                    ] {
+                        self.save(key, &value);
+                    }
+                    self.sync_active = self.sync_form.clone();
+                    self.sync_enabled = true;
+                    self.restart_sync(ctx);
+                }
+            }
+            if self.sync_enabled {
+                if !form_changed && ui.button("Sync now").clicked() {
+                    self.nudge_sync();
+                }
+                if ui.button("Turn off").clicked() {
+                    self.sync_enabled = false;
+                    self.save("sync_enabled", "false");
+                    self.restart_sync(ctx);
+                }
+            }
+        });
+
+        if let Some(s) = running {
+            let (text, color) = if s.running {
+                ("Syncing…".to_string(), MUTED)
+            } else if let Some(e) = &s.error {
+                (e.clone(), DANGER)
+            } else if let Some(at) = s.last_success {
+                let secs = at.elapsed().as_secs();
+                let ago = if secs < 10 { "just now".to_string() } else if secs < 120 { format!("{secs} s ago") } else { format!("{} min ago", secs / 60) };
+                (format!("✔ Synced {ago} · list “{}”", self.sync_active.list_name), SUCCESS)
+            } else {
+                ("Connecting…".to_string(), MUTED)
+            };
+            ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
+        } else if !self.sync_enabled {
+            ui.label(
+                RichText::new("Use a Nextcloud app password, not your login password. The list is created if it doesn't exist.")
+                    .small()
+                    .color(MUTED),
+            );
+        }
+    }
+
     fn settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -1403,6 +1547,11 @@ impl FlowStateApp {
 
                 theme::card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
+                    self.sync_settings(ui, ctx);
+                });
+
+                theme::card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     section_title(ui, "Window", "");
                     if ui.checkbox(&mut self.always_on_top, "Keep FlowState above other windows").changed() {
                         self.save("always_on_top", &self.always_on_top.to_string());
@@ -1488,6 +1637,7 @@ impl eframe::App for FlowStateApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_background();
+        self.poll_sync();
         self.tick_timer(ctx);
 
         if self.applied_on_top != Some(self.always_on_top) {

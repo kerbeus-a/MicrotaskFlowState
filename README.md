@@ -73,6 +73,23 @@ CI builds and tests Windows, Ubuntu and Fedora on every push (`.github/workflows
 2. Optional: in **Settings → Task understanding**, choose *On-device AI* and download Qwen2.5 0.5B (491 MB). The model loads in the background at startup, so each memo then takes about a second.
 3. Tap the mic and talk.
 
+### Sync with iPhone (Nextcloud)
+
+FlowState can sync two ways with a Nextcloud task list, which the iPhone's built-in Reminders app shows as a list.
+
+1. **Nextcloud:** go to *Settings → Security → Devices & sessions* and create two app passwords: "FlowState" and "iPhone".
+2. **FlowState (each computer):** open *Settings → Sync with Nextcloud*, enter your server address, username, the FlowState app password and a list name (default `FlowState`), then click **Connect**. The list is created if it doesn't exist.
+3. **iPhone:** go to *Settings → Apps → Reminders → Reminders Accounts → Add Account → Other → Add CalDAV Account* and enter:
+   - Server: your Nextcloud address, e.g. `cloud.example.com`
+   - User name: your username
+   - Password: the iPhone app password
+
+   The **FlowState** list then appears in Reminders. Add to it by typing, or tell Siri "add *buy filters* to FlowState".
+
+What syncs: task text, done/not done, and high priority (`!!!` in Reminders). Notes, due dates and alerts added on the phone are kept, though FlowState doesn't show them. Deleting a task on one side deletes it on the other. Changes made on the computer go up within a second or two; the server is checked every 30 seconds.
+
+The app password is stored in FlowState's local database (`flowstate.db`).
+
 ### Command-line diagnostics
 
 ```bash

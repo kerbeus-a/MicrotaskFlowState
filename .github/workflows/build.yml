@@ -36,8 +36,23 @@ jobs:
         with:
           workspaces: rust
 
+      - name: Start a CalDAV server for the sync test
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          pip install --quiet radicale
+          python3 -m radicale --storage-filesystem-folder="$RUNNER_TEMP/radicale" \
+            --auth-type=none --server-hosts=127.0.0.1:5232 > "$RUNNER_TEMP/radicale.log" 2>&1 &
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:5232/.web/ && break; sleep 1; done
+          echo "FLOWSTATE_CALDAV_URL=http://127.0.0.1:5232" >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test --release
+
+      - name: CalDAV server log
+        if: failure() && runner.os == 'Linux'
+        working-directory: .
+        run: cat "$RUNNER_TEMP/radicale.log" || true
 
       - name: Build
         run: cargo build --release

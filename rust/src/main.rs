@@ -13,6 +13,7 @@ mod models;
 mod notify;
 mod parser;
 mod qwen2;
+mod sync;
 mod theme;
 mod whisper;
 
