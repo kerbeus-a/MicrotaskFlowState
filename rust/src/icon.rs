@@ -2,8 +2,9 @@
 //! Shared with build.rs (via `#[path]`), so this file must not depend on any crate.
 
 /// Gradient start (top-left) and end (bottom-right) of the icon background.
-const FROM: [f32; 3] = [124.0, 92.0, 255.0];
-const TO: [f32; 3] = [34.0, 211.0, 238.0];
+/// Warm amber → hot orange: stands out on dark and light taskbars alike.
+const FROM: [f32; 3] = [255.0, 184.0, 28.0];
+const TO: [f32; 3] = [255.0, 72.0, 20.0];
 
 fn sd_round_box(px: f32, py: f32, half: f32, r: f32) -> f32 {
     let qx = px.abs() - half + r;

@@ -44,7 +44,23 @@ cargo build --release
 
 The binary is `rust/target/release/flowstate`. For a menu entry, copy `rust/packaging/linux/flowstate.desktop` to `~/.local/share/applications/` and put `flowstate` on your `PATH`.
 
-CI builds and tests both platforms on every push (`.github/workflows/build.yml`).
+### Fedora (.rpm)
+
+Easiest: download the `flowstate-fedora-rpm` artifact from the latest CI run and install it:
+
+```bash
+sudo dnf install ./flowstate-*.x86_64.rpm
+```
+
+Or build the package yourself on Fedora (installs build dependencies, then writes the .rpm to `rust/target/generate-rpm/`):
+
+```bash
+bash rust/packaging/linux/build-rpm.sh
+```
+
+The package installs `/usr/bin/flowstate`, a menu entry and the icon.
+
+CI builds and tests Windows, Ubuntu and Fedora on every push (`.github/workflows/build.yml`).
 
 ### Performance notes
 

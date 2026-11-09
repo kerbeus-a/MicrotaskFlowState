@@ -58,3 +58,24 @@ debug-assertions = true
 [profile.dev.package."*"]
 opt-level = 3
 
+# Fedora / RHEL package: `cargo generate-rpm` (see packaging/linux/build-rpm.sh).
+[package.metadata.generate-rpm]
+name = "flowstate"
+summary = "Voice-first micro-task manager"
+license = "LicenseRef-Proprietary"
+url = "https://github.com/kerbeus-a/MicrotaskFlowState"
+assets = [
+    { source = "target/release/flowstate", dest = "/usr/bin/flowstate", mode = "755" },
+    { source = "packaging/linux/flowstate.desktop", dest = "/usr/share/applications/flowstate.desktop", mode = "644" },
+    { source = "packaging/linux/flowstate.svg", dest = "/usr/share/icons/hicolor/scalable/apps/flowstate.svg", mode = "644" },
+]
+
+# Libraries the window and audio stack load at runtime (dlopen, so not auto-detected).
+[package.metadata.generate-rpm.requires]
+alsa-lib = "*"
+libxkbcommon = "*"
+libglvnd-egl = "*"
+libglvnd-glx = "*"
+libwayland-client = "*"
+libwayland-egl = "*"
+

@@ -46,3 +46,45 @@ jobs:
         with:
           name: flowstate-${{ runner.os }}
           path: ${{ matrix.artifact }}
+
+  fedora-rpm:
+    runs-on: ubuntu-latest
+    container: fedora:43
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Install Fedora build dependencies
+        working-directory: /
+        run: |
+          dnf install -y git gcc gcc-c++ cmake clang clang-devel pkgconf-pkg-config \
+            alsa-lib-devel libxkbcommon-devel wayland-devel libX11-devel \
+            libXcursor-devel libXrandr-devel libXi-devel mesa-libGL-devel \
+            rpm-build tar gzip zstd
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: fedora
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package RPM
+        run: |
+          cargo install cargo-generate-rpm --locked
+          cargo generate-rpm
+          rpm -qip target/generate-rpm/*.rpm
+          rpm -qlp target/generate-rpm/*.rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flowstate-fedora-rpm
+          path: rust/target/generate-rpm/*.rpm
