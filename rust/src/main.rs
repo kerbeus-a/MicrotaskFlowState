@@ -6,6 +6,7 @@
 mod app;
 mod audio;
 mod database;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod icon;
 mod llm;
 mod models;
@@ -23,12 +24,19 @@ fn main() -> eframe::Result<()> {
         std::process::exit(cli(&args));
     }
 
-    let icon_size = 64;
-    let icon = egui::IconData {
-        rgba: icon::render_rgba(icon_size),
-        width: icon_size,
-        height: icon_size,
+    #[cfg(windows)]
+    let icon = {
+        let icon_size = 64;
+        egui::IconData {
+            rgba: icon::render_rgba(icon_size),
+            width: icon_size,
+            height: icon_size,
+        }
     };
+    // Linux uses the designed icon that is also installed into the icon theme.
+    #[cfg(not(windows))]
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../packaging/linux/flowstate-256.png"))
+        .expect("bundled icon is a valid PNG");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
